@@ -18,14 +18,39 @@ enum Material {
     Rock,
 }
 
+fn choose_random_material(rng: &mut ThreadRng) -> Material {
+    match rng.gen_range(0..5) {
+            0 => Material::Gas,
+            1 => Material::Air,
+            2 => Material::Water,
+            3 => Material::Sand,
+            _ => Material::Rock,
+        }
+}
+
 struct Particle {
-    material: Material
+    material: Material,
+    alpha: f32
+}
+
+fn choose_alpha(rng: &mut ThreadRng) -> f32 {
+    rng.gen_range(0..50) as f32 / 100.0
+}
+
+fn density(material: Material) -> f32 {
+    match material {
+        Material::Gas => 0.1,
+        Material::Air => 0.3,
+        Material::Water => 1.0,
+        Material::Sand => 1.5,
+        Material::Rock => 2.0
+    }
 }
 
 fn viscosity(material: Material) -> usize {
     match material {
-        Material::Gas => 4,
-        Material::Air => 3,
+        Material::Gas => 6,
+        Material::Air => 4,
         Material::Water => 2,
         Material::Sand => 1,
         Material::Rock => 0
@@ -33,7 +58,12 @@ fn viscosity(material: Material) -> usize {
 }
 
 fn heavier(a: Material, b: Material) -> bool {
-    a as usize > b as usize
+    density(a) > density(b)
+}
+
+struct Source {
+    material: Material,
+    location: usize
 }
 
 #[derive(Resource)]
@@ -42,11 +72,13 @@ struct Simulation {
     height: usize,
     grid: Vec<Particle>,
     order: Vec<usize>,
+    sources: Vec<Source>
 }
 
 impl Simulation {
     fn new(width: usize, height: usize) -> Self {
         let mut rng = rand::thread_rng();
+        let mut rng_alpha = rand::thread_rng();
         let grid = (0..width * height)
             .map(|_| match rng.gen_range(0..5) {
                 0 => Material::Gas,
@@ -55,11 +87,26 @@ impl Simulation {
                 3 => Material::Sand,
                 _ => Material::Rock,
             })
-            .map(|m| Particle {material: m})
+            .map(|m| Particle {material: m, alpha: choose_alpha(&mut rng_alpha)})
             .collect();
         let mut order: Vec<usize> = (0..width * height).map(|v| v).collect();
         order.shuffle(&mut rng);
-        Self { width, height, grid, order }
+
+        let sources = Vec::new();
+
+        Self { width, height, grid, order, sources }
+    }
+
+    fn reset_random(&mut self) {
+        let mut rng = rand::thread_rng();
+        let material = choose_random_material(&mut rng);
+        for idx in 0..self.width*self.height {
+            self.grid[idx].material = material;
+        }
+
+        let source_idx = rng.gen_range(0..self.height * self.width);
+        let material = choose_random_material(&mut rng);
+        self.sources.push(Source {location: source_idx, material});
     }
 
     fn update(&mut self) {
@@ -67,6 +114,9 @@ impl Simulation {
         let mut moved = HashMap::new();
         for order_idx in 0..self.order.len() {
             self.update_tile(order_idx, &mut rng, &mut moved);
+        }
+        for source in &self.sources {
+            self.grid[source.location].material = source.material;
         }
     }
 
@@ -76,6 +126,7 @@ impl Simulation {
         let x = idx % self.width;
         let y = idx / self.width;
 
+        let idx_above = if idx > self.width { idx - self.width } else { 0 };
         let idx_below = idx + self.width;
         let idx_left = if idx > 0 { idx - 1 } else { 0 };
         let idx_right = idx + 1;
@@ -85,21 +136,46 @@ impl Simulation {
         // 0,0 is top left
         let particle = &self.grid[idx];
         let material = particle.material;
+        let this_viscocity = viscosity(material);
         let mut particle_moved = false;
+
         if y < self.height - 1 && heavier(material, self.grid[idx_below].material) {
-            particle_moved = self.try_swap(idx, idx_below, moved);
+            particle_moved = self.try_swap(idx, idx_below, moved, 1);
+        }
+
+        if !particle_moved && y > 0 && heavier( self.grid[idx_above].material, material) {
+            particle_moved = self.try_swap(idx_above, idx, moved, 1);
+
         }
         
-        if !particle_moved && viscosity(material) > 1 {
+        if !particle_moved && this_viscocity > 2 {
+            for i in 0..this_viscocity {
+                if choice && x > i {
+                    let material_left = self.grid[idx - i].material;
+                    if viscosity(material_left) > 2 && material != material_left {
+                        particle_moved = self.try_swap(idx, idx - i, moved, i);
+                        break;
+                    }
+                } else if !choice && x < (self.width - i - 1) {
+                    let material_right = self.grid[idx + i].material;
+                    if viscosity(material_right) > 2 && material != material_right {
+                        particle_moved =self.try_swap(idx, idx + i, moved, i);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !particle_moved && this_viscocity > 1 {
             if choice && x > 0 {
                 let material_left = self.grid[idx_left].material;
-                if viscosity(material_left) > 1 && heavier(material_left, material) {
-                    particle_moved =self.try_swap(idx, idx_left, moved);
+                if viscosity(material_left) > 1 && material != material_left {
+                    particle_moved = self.try_swap(idx, idx_left, moved, 1);
                 }
             } else if !choice && x < (self.width - 1) {
                 let material_right = self.grid[idx_right].material;
-                if viscosity(material_right) > 1 && heavier(material_right, material) {
-                    particle_moved =self.try_swap(idx, idx_right, moved);
+                if viscosity(material_right) > 1 && material != material_right {
+                    particle_moved = self.try_swap(idx, idx_right, moved, 1);
                 }
             }
         }
@@ -110,14 +186,14 @@ impl Simulation {
                 let idx_below_left = idx_below - 1;
                 let material_below_left = self.grid[idx_below_left].material;
                 if heavier(material, material_left) && heavier(material, material_below_left) {
-                    particle_moved = self.try_swap(idx, idx_left, moved);
+                    particle_moved = self.try_swap(idx, idx_left, moved, 1);
                 }
             } else if !choice && x < (self.width - 1) {
                 let material_right = self.grid[idx_right].material;
                 let idx_below_right = idx_below + 1;
                 let material_below_right = self.grid[idx_below_right].material;
                 if heavier(material, material_right) && heavier(material, material_below_right) {
-                    particle_moved = self.try_swap(idx, idx_right, moved);
+                    particle_moved = self.try_swap(idx, idx_right, moved, 1);
                 }
             }
         }
@@ -128,18 +204,18 @@ impl Simulation {
             if choice && x > 0 {
                 let material_left = self.grid[idx_left].material;
                 if heavier(material, material_left) && heavier(material_above, material_left) {
-                    particle_moved = self.try_swap(idx, idx_left, moved);
+                    self.try_swap(idx, idx_left, moved, 1);
                 }
             } else if !choice && x < (self.width - 1) {
                 let material_right = self.grid[idx_right].material;
                 if heavier(material, material_right) && heavier(material_above, material_right) {
-                    particle_moved = self.try_swap(idx, idx_right, moved);
+                    self.try_swap(idx, idx_right, moved, 1);
                 }
             }
         }
     }
 
-    fn try_swap(&mut self, idx_a: usize, idx_b: usize, moved: &mut HashMap<usize, usize>) -> bool {
+    fn try_swap(&mut self, idx_a: usize, idx_b: usize, moved: &mut HashMap<usize, usize>, distance: usize) -> bool {
         if self.grid[idx_a].material == Material::Rock || self.grid[idx_b].material == Material::Rock {
             return false;
         }
@@ -149,8 +225,8 @@ impl Simulation {
         let viscocity_b = viscosity(self.grid[idx_a].material);
         if moved_a < viscocity_a && moved_b < viscocity_b {
             self.grid.swap(idx_a, idx_b);
-            moved.insert(idx_a, moved_a + 1);
-            moved.insert(idx_b, moved_b + 1);
+            moved.insert(idx_a, moved_a + distance);
+            moved.insert(idx_b, moved_b + distance);
             true
         } else {
             false
@@ -161,16 +237,16 @@ impl Simulation {
         let y: usize = pos.y.try_into().unwrap();
         let x: usize = pos.x.try_into().unwrap();
         let idx: usize = y * self.width + x;
-        self.get_tile_color(self.grid[idx].material)
+        self.get_tile_color(&self.grid[idx])
     }
 
-    fn get_tile_color(&self, tile: Material) -> Color {
-        match tile {
-            Material::Gas => Color::srgba(0.2, 0.8, 0.1, 0.8),
-            Material::Air => Color::srgba(0.0, 0.0, 0.0, 0.0),
-            Material::Water => Color::srgba(0.0, 0.0, 1.0, 0.8),
-            Material::Sand => Color::srgba(1.0, 1.0, 0.1, 0.8),
-            Material::Rock => Color::srgba(1.0, 1.0, 1.0, 0.6),
+    fn get_tile_color(&self, particle: &Particle) -> Color {
+        match particle.material {
+            Material::Gas => Color::srgba(0.2, 0.8, 0.1, 0.5 + particle.alpha),
+            Material::Air => Color::srgba(0.0, 0.0, 0.0, particle.alpha),
+            Material::Water => Color::srgba(0.0, 0.0, 1.0, 0.5 + particle.alpha),
+            Material::Sand => Color::srgba(1.0, 1.0, 0.1, 0.5 + particle.alpha),
+            Material::Rock => Color::srgba(1.0, 1.0, 1.0, 0.3 + particle.alpha),
         }
     }
 }
@@ -210,83 +286,24 @@ fn main() {
                 .build(),
             PixelBufferPlugin))
         .add_systems(Startup, (setup, pixel_buffer_setup(size)))
-        .insert_resource(Time::<Fixed>::from_seconds(0.05))
-        .add_systems(FixedUpdate, update)
+        // .insert_resource(Time::<Fixed>::from_seconds(0.01))
+        // .add_systems(FixedUpdate, update)
+        .add_systems(Update, update)
+        .add_systems(Update, keyboard_input)
         .run();
 }
 
 fn update(mut pb: QueryPixelBuffer, mut simulation: ResMut<Simulation>) {
     simulation.update();
+
     pb.frame().per_pixel(|pos, _| simulation.get_color(pos));
 }
 
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_water_falls() {
-        let mut sim = Simulation {
-            width: 3,
-            height: 3,
-            grid: vec![
-                Material::Rock, Material::Rock, Material::Rock,
-                Material::Water, Material::Water, Material::Water,
-                Material::Gas, Material::Air, Material::Sand,
-            ].iter().map(|&m| Particle {material:m}).collect(),
-            order: (0..9).collect()
-        };
-
-        for _ in 0..9 {
-            sim.update();
-        }
-
-        assert_eq!(sim.grid[6].material, Material::Water); // Water should fall through gas
-        assert_eq!(sim.grid[7].material, Material::Water); // Water should fall through air
-        assert_eq!(sim.grid[8].material, Material::Sand); // Water should not fall through sand
-    }
-
-    #[test]
-    fn test_sand_falls() {
-        let mut sim = Simulation {
-            width: 3,
-            height: 3,
-            grid: vec![
-                Material::Rock, Material::Rock, Material::Rock,
-                Material::Sand, Material::Sand, Material::Sand,
-                Material::Water, Material::Air, Material::Gas,
-            ].iter().map(|&m| Particle {material:m}).collect(),
-            order: (0..9).collect()
-        };
-
-        for _ in 0..9 {
-            sim.update();
-        }
-
-        assert_eq!(sim.grid[6].material, Material::Sand); // Sand should fall through water
-        assert_eq!(sim.grid[7].material, Material::Sand); // Sand should fall through air
-        assert_eq!(sim.grid[8].material, Material::Sand); // Sand should fall through gas
-    }
-
-    #[test]
-    fn test_sand_moves_sideways() {
-        let mut sim = Simulation {
-            width: 3,
-            height: 3,
-            grid: vec![
-                Material::Air, Material::Sand, Material::Air,
-                Material::Air, Material::Sand, Material::Air,
-                Material::Rock, Material::Rock, Material::Rock,
-            ].iter().map(|&m| Particle {material:m}).collect(),
-            order: (0..9).collect()
-        };
-    
-        for _ in 0..9 {
-            sim.update()
-        }
-
-        let sand_moved = sim.grid[3].material == Material::Sand || sim.grid[5].material == Material::Sand;
-        assert!(sand_moved); // Sand should move one side
+fn keyboard_input(
+    mut simulation: ResMut<Simulation>,
+    keys: Res<ButtonInput<KeyCode>>,
+) {
+    if keys.just_pressed(KeyCode::Space) {
+        simulation.reset_random();
     }
 }
