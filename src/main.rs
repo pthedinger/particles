@@ -231,17 +231,20 @@ mod tests {
             width: 3,
             height: 3,
             grid: vec![
-                Material::Air, Material::Air, Material::Air,
-                Material::Water, Material::Air, Material::Air,
                 Material::Rock, Material::Rock, Material::Rock,
+                Material::Water, Material::Water, Material::Water,
+                Material::Gas, Material::Air, Material::Sand,
             ].iter().map(|&m| Particle {material:m}).collect(),
             order: (0..9).collect()
         };
 
-        sim.update();
+        for _ in 0..9 {
+            sim.update();
+        }
 
-        assert_eq!(sim.grid[3].material, Material::Air); // Water should fall
-        assert_eq!(sim.grid[0].material, Material::Water); // Water should now be at index 0
+        assert_eq!(sim.grid[6].material, Material::Water); // Water should fall through gas
+        assert_eq!(sim.grid[7].material, Material::Water); // Water should fall through air
+        assert_eq!(sim.grid[8].material, Material::Sand); // Water should not fall through sand
     }
 
     #[test]
@@ -251,8 +254,8 @@ mod tests {
             height: 3,
             grid: vec![
                 Material::Rock, Material::Rock, Material::Rock,
-                Material::Sand, Material::Water, Material::Air,
-                Material::Air, Material::Air, Material::Air,
+                Material::Sand, Material::Sand, Material::Sand,
+                Material::Water, Material::Air, Material::Gas,
             ].iter().map(|&m| Particle {material:m}).collect(),
             order: (0..9).collect()
         };
@@ -261,8 +264,9 @@ mod tests {
             sim.update();
         }
 
-        assert_eq!(sim.grid[1].material, Material::Sand); // Sand should fall on water
-        assert_eq!(sim.grid[3].material, Material::Air); // Sand should move down
+        assert_eq!(sim.grid[6].material, Material::Sand); // Sand should fall through water
+        assert_eq!(sim.grid[7].material, Material::Sand); // Sand should fall through air
+        assert_eq!(sim.grid[8].material, Material::Sand); // Sand should fall through gas
     }
 
     #[test]
@@ -271,15 +275,18 @@ mod tests {
             width: 3,
             height: 3,
             grid: vec![
-                Material::Air, Material::Air, Material::Air,
-                Material::Sand, Material::Rock, Material::Air,
+                Material::Air, Material::Sand, Material::Air,
+                Material::Air, Material::Sand, Material::Air,
                 Material::Rock, Material::Rock, Material::Rock,
             ].iter().map(|&m| Particle {material:m}).collect(),
             order: (0..9).collect()
         };
+    
+        for _ in 0..9 {
+            sim.update()
+        }
 
-        sim.update();
-
-        assert_eq!(sim.grid[2].material, Material::Sand); // Sand should move to the right
+        let sand_moved = sim.grid[3].material == Material::Sand || sim.grid[5].material == Material::Sand;
+        assert!(sand_moved); // Sand should move one side
     }
 }
