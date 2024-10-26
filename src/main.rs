@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use bevy_pixel_buffer::prelude::*;
+use bevy::window::PrimaryWindow;
 use rand::prelude::*;
 use rand::seq::SliceRandom;
 use std::collections::HashMap;
@@ -17,6 +18,12 @@ enum Material {
     Sand,
     Rock,
 }
+
+enum InsertMode {
+    Material,
+    Source,
+}
+
 
 fn choose_random_material(rng: &mut ThreadRng) -> Material {
     match rng.gen_range(0..5) {
@@ -72,7 +79,9 @@ struct Simulation {
     height: usize,
     grid: Vec<Particle>,
     order: Vec<usize>,
-    sources: Vec<Source>
+    sources: HashMap<usize, Source>,
+    material: Material,
+    insert_mode: InsertMode
 }
 
 impl Simulation {
@@ -92,9 +101,11 @@ impl Simulation {
         let mut order: Vec<usize> = (0..width * height).map(|v| v).collect();
         order.shuffle(&mut rng);
 
-        let sources = Vec::new();
+        let sources = HashMap::new();
+        let material = Material::Rock;
+        let insert_mode = InsertMode::Material;
 
-        Self { width, height, grid, order, sources }
+        Self { width, height, grid, order, sources, material, insert_mode }
     }
 
     fn reset_random(&mut self) {
@@ -106,7 +117,32 @@ impl Simulation {
 
         let source_idx = rng.gen_range(0..self.height * self.width);
         let material = choose_random_material(&mut rng);
-        self.sources.push(Source {location: source_idx, material});
+        self.sources.insert(source_idx, Source {location: source_idx, material});
+    }
+
+    fn set_material(&mut self, material: Material, shift: bool) {
+        self.material = material;
+        match shift {
+            false => self.insert_mode = InsertMode::Material,
+            true => self.insert_mode = InsertMode::Source
+        }
+    }
+
+    fn insert(&mut self, x: usize, y: usize) {
+        if x < self.width && y < self.height {
+            let idx = y * self.width + x;
+            match self.insert_mode {
+                InsertMode::Material => {
+                    self.grid[idx].material = self.material;
+                    if self.sources.contains_key(&idx) {
+                        self.sources.remove(&idx);
+                    }
+                }
+                InsertMode::Source => {
+                    self.sources.insert(idx, Source {location: idx, material: self.material});
+                }
+            }
+        }
     }
 
     fn update(&mut self) {
@@ -115,8 +151,8 @@ impl Simulation {
         for order_idx in 0..self.order.len() {
             self.update_tile(order_idx, &mut rng, &mut moved);
         }
-        for source in &self.sources {
-            self.grid[source.location].material = source.material;
+        for (idx, source) in &self.sources {
+            self.grid[*idx].material = source.material;
         }
     }
 
@@ -290,6 +326,7 @@ fn main() {
         // .add_systems(FixedUpdate, update)
         .add_systems(Update, update)
         .add_systems(Update, keyboard_input)
+        .add_systems(Update, mouse_button_input)
         .run();
 }
 
@@ -305,5 +342,36 @@ fn keyboard_input(
 ) {
     if keys.just_pressed(KeyCode::Space) {
         simulation.reset_random();
+    }
+
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    if keys.just_pressed(KeyCode::KeyA) {
+        simulation.set_material(Material::Air, shift);
+    }
+    if keys.just_pressed(KeyCode::KeyG) {
+        simulation.set_material(Material::Gas, shift);
+    }
+    if keys.just_pressed(KeyCode::KeyR) {
+        simulation.set_material(Material::Rock, shift);
+    }
+    if keys.just_pressed(KeyCode::KeyS) {
+        simulation.set_material(Material::Sand, shift);
+    }
+    if keys.just_pressed(KeyCode::KeyW) {
+        simulation.set_material(Material::Water, shift);
+    }
+}
+
+fn mouse_button_input(
+    mut simulation: ResMut<Simulation>,
+    q_windows: Query<&Window, With<PrimaryWindow>>,
+    buttons: Res<ButtonInput<MouseButton>>,
+) {
+    if buttons.pressed(MouseButton::Left) {
+        if let Some(position) = q_windows.single().cursor_position() {
+            let x = position.x as usize / PIXEL_SIZE;
+            let y = position.y as usize / PIXEL_SIZE;
+            simulation.insert(x, y);
+        }
     }
 }
