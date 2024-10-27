@@ -57,8 +57,8 @@ fn density(material: Material) -> f32 {
 fn viscosity(material: Material) -> usize {
     match material {
         Material::Gas => 6,
-        Material::Air => 4,
-        Material::Water => 2,
+        Material::Air => 5,
+        Material::Water => 4,
         Material::Sand => 1,
         Material::Rock => 0
     }
@@ -188,13 +188,13 @@ impl Simulation {
             for i in 0..this_viscocity {
                 if choice && x > i {
                     let material_left = self.grid[idx - i].material;
-                    if viscosity(material_left) > 2 && material != material_left {
+                    if viscosity(material_left) > 4 && material != material_left {
                         particle_moved = self.try_swap(idx, idx - i, moved, i);
                         break;
                     }
                 } else if !choice && x < (self.width - i - 1) {
                     let material_right = self.grid[idx + i].material;
-                    if viscosity(material_right) > 2 && material != material_right {
+                    if viscosity(material_right) > 4 && material != material_right {
                         particle_moved =self.try_swap(idx, idx + i, moved, i);
                         break;
                     }
