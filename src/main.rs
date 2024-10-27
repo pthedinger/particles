@@ -77,7 +77,8 @@ fn heavier(a: Material, b: Material) -> bool {
 
 struct Source {
     material: Material,
-    location: usize
+    rate: usize,
+    last_inserted: usize,
 }
 
 #[derive(Resource)]
@@ -88,7 +89,8 @@ struct Simulation {
     order: Vec<usize>,
     sources: HashMap<usize, Source>,
     material: Material,
-    insert_mode: InsertMode
+    insert_mode: InsertMode,
+    insert_rate: usize,
 }
 
 impl Simulation {
@@ -105,8 +107,9 @@ impl Simulation {
         let sources = HashMap::new();
         let material = Material::Rock;
         let insert_mode = InsertMode::Material;
+        let insert_rate = 5;
 
-        Self { width, height, grid, order, sources, material, insert_mode }
+        Self { width, height, grid, order, sources, material, insert_mode, insert_rate }
     }
 
     fn set_all(&mut self) {
@@ -134,6 +137,10 @@ impl Simulation {
         }
     }
 
+    fn set_insert_rate(&mut self, rate: usize) {
+        self.insert_rate = 10 - rate;
+    }
+
     fn insert(&mut self, x: usize, y: usize) {
         if x < self.width && y < self.height {
             let idx = y * self.width + x;
@@ -145,7 +152,11 @@ impl Simulation {
                     }
                 }
                 InsertMode::Source => {
-                    self.sources.insert(idx, Source {location: idx, material: self.material});
+                    self.sources.insert(idx, Source {
+                        material: self.material,
+                        rate: self.insert_rate,
+                        last_inserted: 0
+                    });
                 }
             }
         }
@@ -157,8 +168,13 @@ impl Simulation {
         for order_idx in 0..self.order.len() {
             self.update_tile(order_idx, &mut rng, &mut moved);
         }
-        for (idx, source) in &self.sources {
-            self.grid[*idx].material = source.material;
+        for (idx, source) in &mut self.sources {
+            if source.last_inserted <= 1 {
+                source.last_inserted = source.rate;
+                self.grid[*idx].material = source.material;
+            } else {
+                source.last_inserted -= 1;
+            }
         }
     }
 
@@ -379,6 +395,33 @@ fn keyboard_input(
     }
     if keys.just_pressed(KeyCode::Enter) {
         simulation.reset_random();
+    }
+    if keys.just_pressed(KeyCode::Digit1) {
+        simulation.set_insert_rate(1);
+    }
+    if keys.just_pressed(KeyCode::Digit2) {
+        simulation.set_insert_rate(2);
+    }
+    if keys.just_pressed(KeyCode::Digit3) {
+        simulation.set_insert_rate(3);
+    }
+    if keys.just_pressed(KeyCode::Digit4) {
+        simulation.set_insert_rate(4);
+    }
+    if keys.just_pressed(KeyCode::Digit5) {
+        simulation.set_insert_rate(5);
+    }
+    if keys.just_pressed(KeyCode::Digit6) {
+        simulation.set_insert_rate(6);
+    }
+    if keys.just_pressed(KeyCode::Digit7) {
+        simulation.set_insert_rate(7);
+    }
+    if keys.just_pressed(KeyCode::Digit8) {
+        simulation.set_insert_rate(8);
+    }
+    if keys.just_pressed(KeyCode::Digit9) {
+        simulation.set_insert_rate(9);
     }
 }
 
