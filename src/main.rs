@@ -12,8 +12,10 @@ const PIXEL_SIZE: usize = 4;
 // Order is important - lighter at the top
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Material {
+    Fire,
     Gas,
     Air,
+    Oil,
     Water,
     Sand,
     Rock,
@@ -29,8 +31,9 @@ fn choose_random_material(rng: &mut ThreadRng) -> Material {
     match rng.gen_range(0..5) {
             0 => Material::Gas,
             1 => Material::Air,
-            2 => Material::Water,
-            3 => Material::Sand,
+            2 => Material::Oil,
+            3 => Material::Water,
+            4 => Material::Sand,
             _ => Material::Rock,
         }
 }
@@ -46,8 +49,10 @@ fn choose_alpha(rng: &mut ThreadRng) -> f32 {
 
 fn density(material: Material) -> f32 {
     match material {
+        Material::Fire => 0.1,
         Material::Gas => 0.1,
         Material::Air => 0.3,
+        Material::Oil => 0.9,
         Material::Water => 1.0,
         Material::Sand => 1.5,
         Material::Rock => 2.0
@@ -56,9 +61,11 @@ fn density(material: Material) -> f32 {
 
 fn viscosity(material: Material) -> usize {
     match material {
+        Material::Fire => 10,
         Material::Gas => 6,
         Material::Air => 5,
         Material::Water => 4,
+        Material::Oil => 4,
         Material::Sand => 1,
         Material::Rock => 0
     }
@@ -89,13 +96,7 @@ impl Simulation {
         let mut rng = rand::thread_rng();
         let mut rng_alpha = rand::thread_rng();
         let grid = (0..width * height)
-            .map(|_| match rng.gen_range(0..5) {
-                0 => Material::Gas,
-                1 => Material::Air,
-                2 => Material::Water,
-                3 => Material::Sand,
-                _ => Material::Rock,
-            })
+            .map(|_| choose_random_material(&mut rng))
             .map(|m| Particle {material: m, alpha: choose_alpha(&mut rng_alpha)})
             .collect();
         let mut order: Vec<usize> = (0..width * height).map(|v| v).collect();
@@ -108,11 +109,16 @@ impl Simulation {
         Self { width, height, grid, order, sources, material, insert_mode }
     }
 
+    fn set_all(&mut self) {
+        for idx in 0..self.width*self.height {
+            self.grid[idx].material = self.material;
+        }
+    }
+
     fn reset_random(&mut self) {
         let mut rng = rand::thread_rng();
-        let material = choose_random_material(&mut rng);
         for idx in 0..self.width*self.height {
-            self.grid[idx].material = material;
+            self.grid[idx].material = choose_random_material(&mut rng);
         }
     }
 
@@ -278,8 +284,10 @@ impl Simulation {
 
     fn get_tile_color(&self, particle: &Particle) -> Color {
         match particle.material {
+            Material::Fire => Color::srgba(1.0, 0.0, 0.0, 0.5 + particle.alpha),
             Material::Gas => Color::srgba(0.2, 0.8, 0.1, 0.5 + particle.alpha),
             Material::Air => Color::srgba(0.0, 0.0, 0.0, particle.alpha),
+            Material::Oil => Color::srgba(0.5, 0.5, 0.5, 0.7 + particle.alpha * 0.5),
             Material::Water => Color::srgba(0.0, 0.0, 1.0, 0.5 + particle.alpha),
             Material::Sand => Color::srgba(1.0, 1.0, 0.1, 0.5 + particle.alpha),
             Material::Rock => Color::srgba(1.0, 1.0, 1.0, 0.3 + particle.alpha),
@@ -341,15 +349,21 @@ fn keyboard_input(
     keys: Res<ButtonInput<KeyCode>>,
 ) {
     if keys.just_pressed(KeyCode::Space) {
-        simulation.reset_random();
+        simulation.set_all();
     }
 
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     if keys.just_pressed(KeyCode::KeyA) {
         simulation.set_material(Material::Air, shift);
     }
+    if keys.just_pressed(KeyCode::KeyF) {
+        simulation.set_material(Material::Fire, shift);
+    }
     if keys.just_pressed(KeyCode::KeyG) {
         simulation.set_material(Material::Gas, shift);
+    }
+    if keys.just_pressed(KeyCode::KeyO) {
+        simulation.set_material(Material::Oil, shift);
     }
     if keys.just_pressed(KeyCode::KeyR) {
         simulation.set_material(Material::Rock, shift);
@@ -362,6 +376,9 @@ fn keyboard_input(
     }
     if keys.just_pressed(KeyCode::KeyC) {
         simulation.clear_sources();
+    }
+    if keys.just_pressed(KeyCode::Enter) {
+        simulation.reset_random();
     }
 }
 
