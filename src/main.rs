@@ -114,10 +114,10 @@ impl Simulation {
         for idx in 0..self.width*self.height {
             self.grid[idx].material = material;
         }
+    }
 
-        let source_idx = rng.gen_range(0..self.height * self.width);
-        let material = choose_random_material(&mut rng);
-        self.sources.insert(source_idx, Source {location: source_idx, material});
+    fn clear_sources(&mut self) {
+        self.sources.clear();
     }
 
     fn set_material(&mut self, material: Material, shift: bool) {
@@ -359,6 +359,9 @@ fn keyboard_input(
     }
     if keys.just_pressed(KeyCode::KeyW) {
         simulation.set_material(Material::Water, shift);
+    }
+    if keys.just_pressed(KeyCode::KeyC) {
+        simulation.clear_sources();
     }
 }
 
