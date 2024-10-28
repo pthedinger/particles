@@ -26,9 +26,8 @@ enum InsertMode {
     Source,
 }
 
-
 fn choose_random_material(rng: &mut ThreadRng) -> Material {
-    match rng.gen_range(0..5) {
+    match rng.gen_range(0..6) {
             0 => Material::Gas,
             1 => Material::Air,
             2 => Material::Oil,
@@ -40,11 +39,39 @@ fn choose_random_material(rng: &mut ThreadRng) -> Material {
 
 struct Particle {
     material: Material,
-    alpha: f32
+    alpha: f32,
+    energy: usize,
+}
+
+impl Default for Particle {
+    fn default() -> Self {
+        Particle {
+            material: Material::Air,
+            alpha: 0.0,
+            energy: 0
+        }
+    }
+}
+
+impl Particle {
+    fn new(material: Material, alpha: f32) -> Self {
+        let mut particle = Particle::default();
+        particle.set_material(material);
+        particle.alpha = alpha;
+        particle
+    }
+    fn set_material(&mut self, material: Material) {
+        self.material = material;
+        self.energy = match material {
+            Material::Gas => 10,
+            Material::Oil => 50,
+            _ => 0,
+        };
+    }
 }
 
 fn choose_alpha(rng: &mut ThreadRng) -> f32 {
-    rng.gen_range(0..50) as f32 / 100.0
+    rng.gen_range(0..100) as f32 / 100.0
 }
 
 fn density(material: Material) -> f32 {
@@ -55,7 +82,7 @@ fn density(material: Material) -> f32 {
         Material::Oil => 0.9,
         Material::Water => 1.0,
         Material::Sand => 1.5,
-        Material::Rock => 2.0
+        Material::Rock => 2.0,
     }
 }
 
@@ -67,7 +94,7 @@ fn viscosity(material: Material) -> usize {
         Material::Water => 4,
         Material::Oil => 4,
         Material::Sand => 1,
-        Material::Rock => 0
+        Material::Rock => 0,
     }
 }
 
@@ -99,7 +126,7 @@ impl Simulation {
         let mut rng_alpha = rand::thread_rng();
         let grid = (0..width * height)
             .map(|_| choose_random_material(&mut rng))
-            .map(|m| Particle {material: m, alpha: choose_alpha(&mut rng_alpha)})
+            .map(|m| Particle::new(m, choose_alpha(&mut rng_alpha)))
             .collect();
         let mut order: Vec<usize> = (0..width * height).map(|v| v).collect();
         order.shuffle(&mut rng);
@@ -114,14 +141,14 @@ impl Simulation {
 
     fn set_all(&mut self) {
         for idx in 0..self.width*self.height {
-            self.grid[idx].material = self.material;
+            self.grid[idx].set_material(self.material);
         }
     }
 
     fn reset_random(&mut self) {
         let mut rng = rand::thread_rng();
         for idx in 0..self.width*self.height {
-            self.grid[idx].material = choose_random_material(&mut rng);
+            self.grid[idx].set_material(choose_random_material(&mut rng));
         }
     }
 
@@ -146,7 +173,7 @@ impl Simulation {
             let idx = y * self.width + x;
             match self.insert_mode {
                 InsertMode::Material => {
-                    self.grid[idx].material = self.material;
+                    self.grid[idx].set_material(self.material);
                     if self.sources.contains_key(&idx) {
                         self.sources.remove(&idx);
                     }
@@ -171,13 +198,69 @@ impl Simulation {
         for (idx, source) in &mut self.sources {
             if source.last_inserted <= 1 {
                 source.last_inserted = source.rate;
-                self.grid[*idx].material = source.material;
+                self.grid[*idx].set_material(source.material);
             } else {
                 source.last_inserted -= 1;
             }
         }
     }
 
+    fn material_above(&self, idx: usize) -> Option<Material> {
+        if idx > self.width {
+            Some(self.grid[idx - self.width].material)
+        } else {
+            None
+        }
+    }
+
+    fn material_below(&self, idx: usize) -> Option<Material> {
+        if (idx / self.width) < (self.height - 1) {
+            Some(self.grid[idx + self.width].material)
+        } else {
+            None
+        }
+    }
+
+    fn material_left(&self, idx: usize) -> Option<Material> {
+        if (idx % self.width) > 0 {
+            Some(self.grid[idx - 1].material)
+        } else {
+            None
+        }
+    }
+
+    fn material_right(&self, idx: usize) -> Option<Material> {
+        if (idx % self.width) < (self.width - 1) {
+            Some(self.grid[idx + 1].material)
+        } else {
+            None
+        }
+    }
+
+    fn neighbour_on_fire(&mut self, idx: usize) -> bool {
+        if let Some(m) = self.material_above(idx) {
+            if m == Material::Fire {
+                return true;
+            }
+        }
+        if let Some(m) = self.material_below(idx) {
+            if m == Material::Fire {
+                return true;
+            }
+        }
+        if let Some(m) = self.material_left(idx) {
+            if m == Material::Fire {
+                return true;
+            }
+        }
+        if let Some(m) = self.material_right(idx) {
+            if m == Material::Fire {
+                return true;
+            }
+        }
+        false
+    }
+        
     fn update_tile(&mut self, order_idx: usize, rng: &mut ThreadRng, moved: &mut HashMap<usize, usize>) {
         // Re-compute the x/y of the chosen location
         let idx = self.order[order_idx];
@@ -192,10 +275,35 @@ impl Simulation {
         let choice = rng.gen_ratio(1, 2);
 
         // 0,0 is top left
-        let particle = &self.grid[idx];
-        let material = particle.material;
+        let material = self.grid[idx].material;
         let this_viscocity = viscosity(material);
         let mut particle_moved = false;
+
+        if material == Material::Fire {
+            if y > 0 && self.grid[idx_above].energy > 0 {
+                self.grid[idx_above].material = Material::Fire;
+            }
+            if y < self.height - 1 && self.grid[idx_below].energy > 0 {
+                self.grid[idx_above].material = Material::Fire;
+            }
+            if x > 0 && self.grid[idx_left].energy > 0 {
+                self.grid[idx_above].material = Material::Fire;
+            }
+            if x < self.width - 1 && self.grid[idx_right].energy > 0 {
+                self.grid[idx_above].material = Material::Fire;
+            }
+            
+            if self.grid[idx].energy > 0 {
+                self.grid[idx].energy -= 1;
+            }
+            if self.grid[idx].energy == 0 {
+                self.grid[idx].material = Material::Air;
+            }
+            return;
+
+        } else if self.grid[idx].energy > 0 && self.neighbour_on_fire(idx) {
+            self.grid[idx].material = Material::Fire;
+        }
 
         if y < self.height - 1 && heavier(material, self.grid[idx_below].material) {
             particle_moved = self.try_swap(idx, idx_below, moved, 1);
@@ -300,13 +408,13 @@ impl Simulation {
 
     fn get_tile_color(&self, particle: &Particle) -> Color {
         match particle.material {
-            Material::Fire => Color::srgba(1.0, 0.0, 0.0, 0.5 + particle.alpha),
-            Material::Gas => Color::srgba(0.2, 0.8, 0.1, 0.5 + particle.alpha),
-            Material::Air => Color::srgba(0.0, 0.0, 0.0, particle.alpha),
-            Material::Oil => Color::srgba(0.5, 0.5, 0.5, 0.7 + particle.alpha * 0.5),
-            Material::Water => Color::srgba(0.0, 0.0, 1.0, 0.5 + particle.alpha),
-            Material::Sand => Color::srgba(1.0, 1.0, 0.1, 0.5 + particle.alpha),
-            Material::Rock => Color::srgba(1.0, 1.0, 1.0, 0.3 + particle.alpha),
+            Material::Fire => Color::srgba(1.0, 0.0, 0.0, 0.5 + particle.alpha * 0.5),
+            Material::Gas => Color::srgba(0.2, 0.8, 0.1, 0.5 + particle.alpha * 0.5),
+            Material::Air => Color::srgba(0.0, 0.0, 0.0, particle.alpha * 0.5),
+            Material::Oil => Color::srgba(0.5, 0.5, 0.5, 0.7 + particle.alpha * 0.3),
+            Material::Water => Color::srgba(0.0, 0.0, 1.0, 0.5 + particle.alpha * 0.5),
+            Material::Sand => Color::srgba(1.0, 1.0, 0.1, 0.5 + particle.alpha * 0.5),
+            Material::Rock => Color::srgba(1.0, 1.0, 1.0, 0.3 + particle.alpha * 0.5),
         }
     }
 }
