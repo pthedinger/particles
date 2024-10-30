@@ -5,6 +5,7 @@ use rand::prelude::*;
 use rand::seq::SliceRandom;
 use core::f32;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use image;
@@ -171,10 +172,8 @@ impl Simulation {
         self.insert_rate = 10 - rate;
     }
 
-    fn set_picture(&mut self) {
-        // let img = image::ImageReader::open("cat.jpeg").unwrap().decode().unwrap();
-        let img = image::ImageReader::open("mountain.png").unwrap().decode().unwrap();
-        // let img = image::ImageReader::open("colors.jpeg").unwrap().decode().unwrap();
+    fn set_picture(&mut self, path: &PathBuf) {
+        let img = image::ImageReader::open(path).unwrap().decode().unwrap();
         let buffer: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> = image::imageops::resize(
             &img,
             self.width.try_into().unwrap(),
@@ -557,12 +556,24 @@ fn main() {
         .add_systems(Update, update)
         .add_systems(Update, keyboard_input)
         .add_systems(Update, mouse_button_input)
+        .add_systems(Update, file_drop)
         .run();
 }
 
 fn update(mut pb: QueryPixelBuffer, mut simulation: ResMut<Simulation>) {
     simulation.update();
     pb.frame().per_pixel(|pos, _| simulation.get_color(pos));
+}
+
+fn file_drop(
+    mut evr_dnd: EventReader<FileDragAndDrop>,
+    mut simulation: ResMut<Simulation>
+) {
+    for ev in evr_dnd.read() {
+        if let FileDragAndDrop::DroppedFile { window: _, path_buf } = ev {
+            simulation.set_picture(path_buf);
+        }
+    }
 }
 
 fn keyboard_input(
@@ -600,9 +611,6 @@ fn keyboard_input(
     }
     if keys.just_pressed(KeyCode::Enter) {
         simulation.reset_random();
-    }
-    if keys.just_pressed(KeyCode::KeyP) {
-        simulation.set_picture();
     }
 
     if keys.just_pressed(KeyCode::Digit1) {
