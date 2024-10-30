@@ -3,14 +3,19 @@ use bevy_pixel_buffer::prelude::*;
 use bevy::window::PrimaryWindow;
 use rand::prelude::*;
 use rand::seq::SliceRandom;
+use core::f32;
 use std::collections::HashMap;
+use strum::IntoEnumIterator;
+use strum_macros::EnumIter;
+use image;
+use image::Pixel;
 
 const GRID_WIDTH: usize = 320;
 const GRID_HEIGHT: usize = 150;
 const PIXEL_SIZE: usize = 4;
 
 // Order is important - lighter at the top
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, EnumIter)]
 enum Material {
     Fire,
     Gas,
@@ -41,6 +46,9 @@ struct Particle {
     material: Material,
     alpha: f32,
     energy: usize,
+    density: f32,
+    viscosity: usize,
+    color: Color
 }
 
 impl Default for Particle {
@@ -48,7 +56,10 @@ impl Default for Particle {
         Particle {
             material: Material::Air,
             alpha: 0.0,
-            energy: 0
+            energy: 0,
+            density: 1.0,
+            viscosity: 1,
+            color: Color::srgba(0.0, 0.0, 0.0, 0.0)
         }
     }
 }
@@ -56,10 +67,11 @@ impl Default for Particle {
 impl Particle {
     fn new(material: Material, alpha: f32) -> Self {
         let mut particle = Particle::default();
-        particle.set_material(material);
         particle.alpha = alpha;
+        particle.set_material(material);
         particle
     }
+
     fn set_material(&mut self, material: Material) {
         self.material = material;
         self.energy = match material {
@@ -67,39 +79,30 @@ impl Particle {
             Material::Oil => 50,
             _ => 0,
         };
+        self.density = match material {
+            Material::Fire => 0.1,
+            Material::Gas => 0.1,
+            Material::Air => 0.3,
+            Material::Oil => 0.9,
+            Material::Water => 1.0,
+            Material::Sand => 1.5,
+            Material::Rock => 2.0,
+        };
+        self.viscosity = match material {
+            Material::Fire => 10,
+            Material::Gas => 6,
+            Material::Air => 5,
+            Material::Water => 4,
+            Material::Oil => 4,
+            Material::Sand => 1,
+            Material::Rock => 0,
+        };
+        self.color = get_material_color(material, self.alpha);
     }
 }
 
 fn choose_alpha(rng: &mut ThreadRng) -> f32 {
-    rng.gen_range(0..100) as f32 / 100.0
-}
-
-fn density(material: Material) -> f32 {
-    match material {
-        Material::Fire => 0.1,
-        Material::Gas => 0.1,
-        Material::Air => 0.3,
-        Material::Oil => 0.9,
-        Material::Water => 1.0,
-        Material::Sand => 1.5,
-        Material::Rock => 2.0,
-    }
-}
-
-fn viscosity(material: Material) -> usize {
-    match material {
-        Material::Fire => 10,
-        Material::Gas => 6,
-        Material::Air => 5,
-        Material::Water => 4,
-        Material::Oil => 4,
-        Material::Sand => 1,
-        Material::Rock => 0,
-    }
-}
-
-fn heavier(a: Material, b: Material) -> bool {
-    density(a) > density(b)
+    rng.gen_range(0..=100) as f32 / 100.0
 }
 
 struct Source {
@@ -168,6 +171,24 @@ impl Simulation {
         self.insert_rate = 10 - rate;
     }
 
+    fn set_picture(&mut self) {
+        // let img = image::ImageReader::open("cat.jpeg").unwrap().decode().unwrap();
+        let img = image::ImageReader::open("mountain.png").unwrap().decode().unwrap();
+        // let img = image::ImageReader::open("colors.jpeg").unwrap().decode().unwrap();
+        let buffer: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> = image::imageops::resize(
+            &img,
+            self.width.try_into().unwrap(),
+            self.height.try_into().unwrap(),
+            image::imageops::FilterType::Lanczos3);
+
+        for (idx, pixel) in buffer.pixels().into_iter().enumerate() {
+            self.grid[idx].set_material(choose_closest_material(pixel));
+
+            // Keep the original image color
+            self.grid[idx].color = pixel_to_color(&pixel);
+        }
+    }
+
     fn insert(&mut self, x: usize, y: usize) {
         if x < self.width && y < self.height {
             let idx = y * self.width + x;
@@ -205,194 +226,236 @@ impl Simulation {
         }
     }
 
-    fn material_above(&self, idx: usize) -> Option<Material> {
-        if idx > self.width {
-            Some(self.grid[idx - self.width].material)
+    fn particle_at(&self, x: i32, y: i32) -> Option<&Particle> {
+        if x >= 0 && x < (self.width as i32) && y >= 0 && y < (self.height as i32) {
+            let new_idx = (y as usize * self.width) + x as usize;
+            Some(&self.grid[new_idx])
         } else {
             None
         }
     }
 
-    fn material_below(&self, idx: usize) -> Option<Material> {
-        if (idx / self.width) < (self.height - 1) {
-            Some(self.grid[idx + self.width].material)
+    fn density_at(&self, x: i32, y: i32) -> Option<f32> {
+        if let Some(particle) = self.particle_at(x,y) {
+            Some(particle.density)
         } else {
             None
         }
     }
 
-    fn material_left(&self, idx: usize) -> Option<Material> {
-        if (idx % self.width) > 0 {
-            Some(self.grid[idx - 1].material)
+    fn material_at(&self, x: i32, y: i32) -> Option<Material> {
+        if let Some(particle) = self.particle_at(x,y) {
+            Some(particle.material)
         } else {
             None
         }
     }
 
-    fn material_right(&self, idx: usize) -> Option<Material> {
-        if (idx % self.width) < (self.width - 1) {
-            Some(self.grid[idx + 1].material)
+    fn energy_at(&self, x: i32, y: i32) -> Option<usize> {
+        if let Some(particle) = self.particle_at(x,y) {
+            Some(particle.energy)
         } else {
             None
         }
     }
 
-    fn neighbour_on_fire(&mut self, idx: usize) -> bool {
-        if let Some(m) = self.material_above(idx) {
+    fn neighbour_on_fire(&mut self, x: i32, y: i32) -> bool {
+        if let Some(m) = self.material_at(x, y - 1) {
             if m == Material::Fire {
                 return true;
             }
         }
-        if let Some(m) = self.material_below(idx) {
+        if let Some(m) = self.material_at(x, y + 1) {
             if m == Material::Fire {
                 return true;
             }
         }
-        if let Some(m) = self.material_left(idx) {
+        if let Some(m) = self.material_at(x - 1, y) {
             if m == Material::Fire {
                 return true;
             }
         }
-        if let Some(m) = self.material_right(idx) {
+        if let Some(m) = self.material_at(x + 1, y) {
             if m == Material::Fire {
                 return true;
             }
         }
         false
     }
+    
+    fn set_on_fire(&mut self, x: i32, y: i32) {
+        // Keep other particle properties - just change the material and color
+        let idx = y as usize * self.width + x as usize;
+        self.grid[idx].material = Material::Fire;
+        self.grid[idx].color = get_material_color(Material::Fire, self.grid[idx].alpha);
+    }
+
+    fn try_set_on_fire(&mut self, x: i32, y: i32) {
+        if let Some(e) = self.energy_at(x, y) {
+            if e > 0 {
+                self.set_on_fire(x, y);
+            }
+        }
+    }
         
     fn update_tile(&mut self, order_idx: usize, rng: &mut ThreadRng, moved: &mut HashMap<usize, usize>) {
-        // Re-compute the x/y of the chosen location
         let idx = self.order[order_idx];
-        let x = idx % self.width;
-        let y = idx / self.width;
-
-        let idx_above = if idx > self.width { idx - self.width } else { 0 };
-        let idx_below = idx + self.width;
-        let idx_left = if idx > 0 { idx - 1 } else { 0 };
-        let idx_right = idx + 1;
-
-        let choice = rng.gen_ratio(1, 2);
 
         // 0,0 is top left
-        let material = self.grid[idx].material;
-        let this_viscocity = viscosity(material);
-        let mut particle_moved = false;
+        let x = (idx % self.width) as i32;
+        let y = (idx / self.width) as i32;
 
-        if material == Material::Fire {
-            if y > 0 && self.grid[idx_above].energy > 0 {
-                self.grid[idx_above].material = Material::Fire;
-            }
-            if y < self.height - 1 && self.grid[idx_below].energy > 0 {
-                self.grid[idx_above].material = Material::Fire;
-            }
-            if x > 0 && self.grid[idx_left].energy > 0 {
-                self.grid[idx_above].material = Material::Fire;
-            }
-            if x < self.width - 1 && self.grid[idx_right].energy > 0 {
-                self.grid[idx_above].material = Material::Fire;
-            }
+        let density = self.density_at(x, y).unwrap();
+        let energy = self.energy_at(x, y).unwrap();
+        let choice = rng.gen_ratio(1, 2);
+
+        if self.grid[idx].material == Material::Fire {
+            self.try_set_on_fire(x, y - 1);
+            self.try_set_on_fire(x, y + 1);
+            self.try_set_on_fire(x - 1, y);
+            self.try_set_on_fire(x + 1, y);
             
-            if self.grid[idx].energy > 0 {
+            if energy > 0 {
                 self.grid[idx].energy -= 1;
             }
-            if self.grid[idx].energy == 0 {
-                self.grid[idx].material = Material::Air;
+            if energy == 0 {
+                self.grid[idx].set_material(Material::Air);
             }
             return;
 
-        } else if self.grid[idx].energy > 0 && self.neighbour_on_fire(idx) {
-            self.grid[idx].material = Material::Fire;
+        } else if energy > 0 && self.neighbour_on_fire(x, y) {
+            self.set_on_fire(x, y);
+            return;
         }
 
-        if y < self.height - 1 && heavier(material, self.grid[idx_below].material) {
-            particle_moved = self.try_swap(idx, idx_below, moved, 1);
+        let material = self.material_at(x, y).unwrap();
+        let this_viscosity = self.grid[idx].viscosity;
+
+        if let Some(density_below) = self.density_at(x, y + 1) {
+            if density > density_below {
+                if self.try_swap(idx, x, y + 1, moved, 1) {
+                    return;
+                }
+            }
         }
 
-        if !particle_moved && y > 0 && heavier( self.grid[idx_above].material, material) {
-            particle_moved = self.try_swap(idx_above, idx, moved, 1);
-
+        if let Some(density_below) = self.density_at(x, y - 1) {
+            if density_below > density {
+                if self.try_swap(idx, x, y - 1, moved, 1) {
+                    return;
+                } 
+            }
         }
         
-        if !particle_moved && this_viscocity > 2 {
-            for i in 0..this_viscocity {
-                if choice && x > i {
-                    let material_left = self.grid[idx - i].material;
-                    if viscosity(material_left) > 4 && material != material_left {
-                        particle_moved = self.try_swap(idx, idx - i, moved, i);
-                        break;
+        if this_viscosity > 2 {
+            for i in 0..this_viscosity {
+                if choice {
+                    if let Some(particle_left) = self.particle_at(x - 1, y) {
+                        if material != particle_left.material {
+                            if particle_left.viscosity > 4 {
+                                if self.try_swap(idx, x - 1, y, moved, i) {
+                                    return;
+                                }
+                            }
+                            break;
+                        }
                     }
-                } else if !choice && x < (self.width - i - 1) {
-                    let material_right = self.grid[idx + i].material;
-                    if viscosity(material_right) > 4 && material != material_right {
-                        particle_moved =self.try_swap(idx, idx + i, moved, i);
-                        break;
+                } else {
+                    if let Some(particle_right) = self.particle_at(x + 1, y) {
+                        if material != particle_right.material {
+                            if particle_right.viscosity > 4 {
+                                if self.try_swap(idx, x + 1, y, moved, i) {
+                                    return;
+                                }
+                            }
+                            break;
+                        }
                     }
                 }
             }
         }
 
-        if !particle_moved && this_viscocity > 1 {
-            if choice && x > 0 {
-                let material_left = self.grid[idx_left].material;
-                if viscosity(material_left) > 1 && material != material_left {
-                    particle_moved = self.try_swap(idx, idx_left, moved, 1);
+        if this_viscosity > 1 {
+            if choice {
+                if let Some(particle_left) = self.particle_at(x - 1, y) {
+                    if particle_left.viscosity > 1 && material != particle_left.material {
+                        if self.try_swap(idx, x - 1, y, moved, 1) {
+                            return;
+                        }
+                    }
                 }
-            } else if !choice && x < (self.width - 1) {
-                let material_right = self.grid[idx_right].material;
-                if viscosity(material_right) > 1 && material != material_right {
-                    particle_moved = self.try_swap(idx, idx_right, moved, 1);
-                }
-            }
-        }
-
-        if !particle_moved && y < (self.height - 1) {
-            if choice && x > 0 {
-                let material_left = self.grid[idx_left].material;
-                let idx_below_left = idx_below - 1;
-                let material_below_left = self.grid[idx_below_left].material;
-                if heavier(material, material_left) && heavier(material, material_below_left) {
-                    particle_moved = self.try_swap(idx, idx_left, moved, 1);
-                }
-            } else if !choice && x < (self.width - 1) {
-                let material_right = self.grid[idx_right].material;
-                let idx_below_right = idx_below + 1;
-                let material_below_right = self.grid[idx_below_right].material;
-                if heavier(material, material_right) && heavier(material, material_below_right) {
-                    particle_moved = self.try_swap(idx, idx_right, moved, 1);
+            } else {
+                if let Some(particle_right) = self.particle_at(x + 1, y) {
+                    if particle_right.viscosity > 1 && material != particle_right.material {
+                        if self.try_swap(idx, x + 1, y, moved, 1) {
+                            return;
+                        }
+                    }
                 }
             }
         }
 
-        if !particle_moved && y > 0 {
-            let idx_above = idx - self.width;
-            let material_above = self.grid[idx_above].material;
-            if choice && x > 0 {
-                let material_left = self.grid[idx_left].material;
-                if heavier(material, material_left) && heavier(material_above, material_left) {
-                    self.try_swap(idx, idx_left, moved, 1);
+        if choice {
+            if let Some(density_left) = self.density_at(x - 1, y) {
+                if let Some(density_below_left) = self.density_at(x - 1, y + 1) {
+                    if density > density_left && density > density_below_left {
+                        if self.try_swap(idx, x - 1, y, moved, 1) {
+                            return;
+                        }
+                    }
                 }
-            } else if !choice && x < (self.width - 1) {
-                let material_right = self.grid[idx_right].material;
-                if heavier(material, material_right) && heavier(material_above, material_right) {
-                    self.try_swap(idx, idx_right, moved, 1);
+            }
+        } else {
+            if let Some(density_right) = self.density_at(x + 1, y) {
+                if let Some(density_below_right) = self.density_at(x + 1, y + 1) {
+                    if density > density_right && density > density_below_right {
+                        if self.try_swap(idx, x + 1, y, moved, 1) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(density_above) = self.density_at(x, y - 1) {
+            if choice {
+                if let Some(density_left) = self.density_at(x - 1, y) {
+                    if density > density_left && density_above > density {
+                        if self.try_swap(idx, x - 1, y, moved, 1) {
+                            return;
+                        }
+                    }
+                }
+            } else {
+                if let Some(density_right) = self.density_at(x - 1, y) {
+                    if density > density_right && density_above > density {
+                        if self.try_swap(idx, x + 1, y, moved, 1) {
+                            return;
+                        }
+                    }
                 }
             }
         }
     }
 
-    fn try_swap(&mut self, idx_a: usize, idx_b: usize, moved: &mut HashMap<usize, usize>, distance: usize) -> bool {
-        if self.grid[idx_a].material == Material::Rock || self.grid[idx_b].material == Material::Rock {
+    fn try_swap(&mut self, from_idx: usize, to_x: i32, to_y: i32, moved: &mut HashMap<usize, usize>, distance: usize) -> bool {
+        if self.grid[from_idx].material == Material::Rock {
             return false;
         }
-        let moved_a = match moved.get(&idx_a) { Some(c) => *c, None => 0 };
-        let moved_b = match moved.get(&idx_b) { Some(c) => *c, None => 0 };
-        let viscocity_a = viscosity(self.grid[idx_a].material);
-        let viscocity_b = viscosity(self.grid[idx_a].material);
-        if moved_a < viscocity_a && moved_b < viscocity_b {
-            self.grid.swap(idx_a, idx_b);
-            moved.insert(idx_a, moved_a + distance);
-            moved.insert(idx_b, moved_b + distance);
+        if let Some(material) = self.material_at(to_x, to_y) {
+            if material == Material::Rock {
+                return false;
+            }
+        }
+
+        let to_idx = to_y as usize * self.width + to_x as usize;
+
+        let from_moved = match moved.get(&from_idx) { Some(c) => *c, None => 0 };
+        let to_moved = match moved.get(&to_idx) { Some(c) => *c, None => 0 };
+        if from_moved < self.grid[from_idx].viscosity && to_moved < self.grid[to_idx].viscosity {
+            self.grid.swap(from_idx, to_idx);
+            moved.insert(from_idx, from_moved + distance);
+            moved.insert(to_idx, to_moved + distance);
             true
         } else {
             false
@@ -403,20 +466,55 @@ impl Simulation {
         let y: usize = pos.y.try_into().unwrap();
         let x: usize = pos.x.try_into().unwrap();
         let idx: usize = y * self.width + x;
-        self.get_tile_color(&self.grid[idx])
+        self.grid[idx].color
     }
+}
 
-    fn get_tile_color(&self, particle: &Particle) -> Color {
-        match particle.material {
-            Material::Fire => Color::srgba(1.0, 0.0, 0.0, 0.5 + particle.alpha * 0.5),
-            Material::Gas => Color::srgba(0.2, 0.8, 0.1, 0.5 + particle.alpha * 0.5),
-            Material::Air => Color::srgba(0.0, 0.0, 0.0, particle.alpha * 0.5),
-            Material::Oil => Color::srgba(0.5, 0.5, 0.5, 0.7 + particle.alpha * 0.3),
-            Material::Water => Color::srgba(0.0, 0.0, 1.0, 0.5 + particle.alpha * 0.5),
-            Material::Sand => Color::srgba(1.0, 1.0, 0.1, 0.5 + particle.alpha * 0.5),
-            Material::Rock => Color::srgba(1.0, 1.0, 1.0, 0.3 + particle.alpha * 0.5),
+fn get_material_color(material: Material, alpha: f32) -> Color {
+    match material {
+        Material::Fire => Color::srgba(1.0, 0.0, 0.0, 0.5 + alpha * 0.5),
+        Material::Gas => Color::srgba(0.2, 0.8, 0.1, 0.5 + alpha * 0.5),
+        Material::Air => Color::srgba(0.0, 0.0, 0.0, alpha * 0.5),
+        Material::Oil => Color::srgba(0.5, 0.5, 0.5, 0.7 + alpha * 0.3),
+        Material::Water => Color::srgba(0.0, 0.0, 1.0, 0.5 + alpha * 0.5),
+        Material::Sand => Color::srgba(1.0, 1.0, 0.1, 0.5 + alpha * 0.5),
+        Material::Rock => Color::srgba(1.0, 1.0, 1.0, 0.3 + alpha * 0.5),
+    }
+}
+
+fn choose_closest_material(pixel: &image::Rgba<u8>) -> Material {
+    let mut closest_material = Material::Air;
+    let mut min = f32::MAX;
+    for material in Material::iter() {
+        let diff = color_diff(get_material_color(material, 0.5), pixel);
+        if diff < min {
+            min = diff;
+            closest_material = material;
         }
     }
+
+    // let rgba = pixel.to_rgba();
+    // println!("{}, {}, {}, {} -> {:?}", rgba[0], rgba[1], rgba[2], rgba[3], closest_material);
+    closest_material
+}
+
+fn pixel_to_color(pixel: &image::Rgba<u8>) -> Color {
+    let rgba = pixel.to_rgba();
+    Color::srgba(
+        rgba[0] as f32 / 255.0,
+        rgba[1] as f32 / 255.0,
+        rgba[2] as f32 / 255.0,
+        rgba[3] as f32 / 255.0)
+}
+
+fn color_diff(color: Color, pixel: &image::Rgba<u8>) -> f32 {
+    let a = color.to_srgba();
+    let b = pixel_to_color(pixel).to_srgba();
+    let rd = a.red - b.red;
+    let gd = a.green - b.green;
+    let bd = a.blue - b.blue;
+    let ad = a.alpha - b.alpha;
+    (rd * rd) + (gd * gd) + (bd * bd) + (ad * ad)
 }
 
 fn setup(mut commands: Commands) {
@@ -464,7 +562,6 @@ fn main() {
 
 fn update(mut pb: QueryPixelBuffer, mut simulation: ResMut<Simulation>) {
     simulation.update();
-
     pb.frame().per_pixel(|pos, _| simulation.get_color(pos));
 }
 
@@ -504,6 +601,10 @@ fn keyboard_input(
     if keys.just_pressed(KeyCode::Enter) {
         simulation.reset_random();
     }
+    if keys.just_pressed(KeyCode::KeyP) {
+        simulation.set_picture();
+    }
+
     if keys.just_pressed(KeyCode::Digit1) {
         simulation.set_insert_rate(1);
     }
