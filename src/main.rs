@@ -374,91 +374,47 @@ impl Simulation {
             }
         }
 
+        let delta_x = if choice { -1 } else { 1 };
         if this_viscosity > 2 {
             for i in 0..this_viscosity {
-                if choice {
-                    if let Some(particle_left) = self.particle_at(x - 1, y) {
-                        if material != particle_left.material {
-                            if particle_left.viscosity > 4 {
-                                if self.try_swap(idx, x - 1, y, moved, i) {
-                                    return;
-                                }
+                if let Some(particle_left) = self.particle_at(x + delta_x, y) {
+                    if material != particle_left.material {
+                        if particle_left.viscosity > 4 {
+                            if self.try_swap(idx, x + delta_x, y, moved, i) {
+                                return;
                             }
-                            break;
                         }
-                    }
-                } else {
-                    if let Some(particle_right) = self.particle_at(x + 1, y) {
-                        if material != particle_right.material {
-                            if particle_right.viscosity > 4 {
-                                if self.try_swap(idx, x + 1, y, moved, i) {
-                                    return;
-                                }
-                            }
-                            break;
-                        }
+                        break;
                     }
                 }
             }
         }
 
         if this_viscosity > 1 {
-            if choice {
-                if let Some(particle_left) = self.particle_at(x - 1, y) {
-                    if particle_left.viscosity > 1 && material != particle_left.material {
-                        if self.try_swap(idx, x - 1, y, moved, 1) {
-                            return;
-                        }
-                    }
-                }
-            } else {
-                if let Some(particle_right) = self.particle_at(x + 1, y) {
-                    if particle_right.viscosity > 1 && material != particle_right.material {
-                        if self.try_swap(idx, x + 1, y, moved, 1) {
-                            return;
-                        }
+            if let Some(particle_left) = self.particle_at(x + delta_x, y) {
+                if particle_left.viscosity > 1 && material != particle_left.material {
+                    if self.try_swap(idx, x + delta_x, y, moved, 1) {
+                        return;
                     }
                 }
             }
         }
 
-        if choice {
-            if let Some(density_left) = self.density_at(x - 1, y) {
-                if let Some(density_below_left) = self.density_at(x - 1, y + 1) {
-                    if density > density_left && density > density_below_left {
-                        if self.try_swap(idx, x - 1, y, moved, 1) {
-                            return;
-                        }
-                    }
-                }
-            }
-        } else {
-            if let Some(density_right) = self.density_at(x + 1, y) {
-                if let Some(density_below_right) = self.density_at(x + 1, y + 1) {
-                    if density > density_right && density > density_below_right {
-                        if self.try_swap(idx, x + 1, y, moved, 1) {
-                            return;
-                        }
+        if let Some(density_left) = self.density_at(x + delta_x, y) {
+            if let Some(density_below_left) = self.density_at(x + delta_x, y + 1) {
+                if density > density_left && density > density_below_left {
+                    if self.try_swap(idx, x + delta_x, y, moved, 1) {
+                        return;
                     }
                 }
             }
         }
 
         if let Some(density_above) = self.density_at(x, y - 1) {
-            if choice {
-                if let Some(density_left) = self.density_at(x - 1, y) {
-                    if density > density_left && density_above > density {
-                        if self.try_swap(idx, x - 1, y, moved, 1) {
-                            return;
-                        }
-                    }
-                }
-            } else {
-                if let Some(density_right) = self.density_at(x - 1, y) {
-                    if density > density_right && density_above > density {
-                        if self.try_swap(idx, x + 1, y, moved, 1) {
-                            return;
-                        }
+            if let Some(density_left) = self.density_at(x + delta_x, y) {
+                if density > density_left && density_above > density {
+                    if self.try_swap(idx, x + delta_x, y, moved, 1) {
+                        return;
                     }
                 }
             }
