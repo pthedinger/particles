@@ -70,6 +70,7 @@ impl Particle {
         let mut particle = Particle::default();
         particle.alpha = alpha;
         particle.set_material(material);
+        particle.color = get_material_color(material, alpha);
         particle
     }
 
@@ -98,7 +99,6 @@ impl Particle {
             Material::Sand => 1,
             Material::Rock => 0,
         };
-        self.color = get_material_color(material, self.alpha);
     }
 }
 
@@ -147,7 +147,7 @@ impl Simulation {
             insert_mode: InsertMode::Material,
             insert_rate: 5,
             paused: false,
-            show_materials: false,
+            show_materials: true,
         }
     }
 
@@ -203,6 +203,7 @@ impl Simulation {
             // Keep the original image color
             self.grid[idx].color = pixel_to_color(&pixel);
         }
+        self.show_materials = false;
     }
 
     fn insert(&mut self, x: usize, y: usize) {
@@ -310,7 +311,6 @@ impl Simulation {
         // Keep other particle properties - just change the material and color
         let idx = y as usize * self.width + x as usize;
         self.grid[idx].material = Material::Fire;
-        self.grid[idx].color = get_material_color(Material::Fire, self.grid[idx].alpha);
     }
 
     fn try_set_on_fire(&mut self, x: i32, y: i32) {
