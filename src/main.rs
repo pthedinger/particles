@@ -1,15 +1,15 @@
 use bevy::prelude::*;
-use bevy_pixel_buffer::prelude::*;
 use bevy::window::PrimaryWindow;
+use bevy_pixel_buffer::prelude::*;
+use core::f32;
+use image;
+use image::Pixel;
 use rand::prelude::*;
 use rand::seq::SliceRandom;
-use core::f32;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
-use image;
-use image::Pixel;
 
 const GRID_WIDTH: usize = 320;
 const GRID_HEIGHT: usize = 150;
@@ -34,13 +34,13 @@ enum InsertMode {
 
 fn choose_random_material(rng: &mut ThreadRng) -> Material {
     match rng.gen_range(0..6) {
-            0 => Material::Gas,
-            1 => Material::Air,
-            2 => Material::Oil,
-            3 => Material::Water,
-            4 => Material::Sand,
-            _ => Material::Rock,
-        }
+        0 => Material::Gas,
+        1 => Material::Air,
+        2 => Material::Oil,
+        3 => Material::Water,
+        4 => Material::Sand,
+        _ => Material::Rock,
+    }
 }
 
 struct Particle {
@@ -49,7 +49,7 @@ struct Particle {
     energy: usize,
     density: f32,
     viscosity: usize,
-    color: Color
+    color: Color,
 }
 
 impl Default for Particle {
@@ -60,7 +60,7 @@ impl Default for Particle {
             energy: 0,
             density: 1.0,
             viscosity: 1,
-            color: Color::srgba(0.0, 0.0, 0.0, 0.0)
+            color: Color::srgba(0.0, 0.0, 0.0, 0.0),
         }
     }
 }
@@ -122,6 +122,8 @@ struct Simulation {
     material: Material,
     insert_mode: InsertMode,
     insert_rate: usize,
+    paused: bool,
+    show_materials: bool,
 }
 
 impl Simulation {
@@ -135,23 +137,29 @@ impl Simulation {
         let mut order: Vec<usize> = (0..width * height).map(|v| v).collect();
         order.shuffle(&mut rng);
 
-        let sources = HashMap::new();
-        let material = Material::Rock;
-        let insert_mode = InsertMode::Material;
-        let insert_rate = 5;
-
-        Self { width, height, grid, order, sources, material, insert_mode, insert_rate }
+        Self {
+            width,
+            height,
+            grid,
+            order,
+            sources: HashMap::new(),
+            material: Material::Rock,
+            insert_mode: InsertMode::Material,
+            insert_rate: 5,
+            paused: false,
+            show_materials: false,
+        }
     }
 
     fn set_all(&mut self) {
-        for idx in 0..self.width*self.height {
+        for idx in 0..self.width * self.height {
             self.grid[idx].set_material(self.material);
         }
     }
 
     fn reset_random(&mut self) {
         let mut rng = rand::thread_rng();
-        for idx in 0..self.width*self.height {
+        for idx in 0..self.width * self.height {
             self.grid[idx].set_material(choose_random_material(&mut rng));
         }
     }
@@ -160,11 +168,19 @@ impl Simulation {
         self.sources.clear();
     }
 
+    fn toggle_paused(&mut self) {
+        self.paused = !self.paused;
+    }
+
+    fn toggle_show_materials(&mut self) {
+        self.show_materials = !self.show_materials;
+    }
+
     fn set_material(&mut self, material: Material, shift: bool) {
         self.material = material;
         match shift {
             false => self.insert_mode = InsertMode::Material,
-            true => self.insert_mode = InsertMode::Source
+            true => self.insert_mode = InsertMode::Source,
         }
     }
 
@@ -178,7 +194,8 @@ impl Simulation {
             &img,
             self.width.try_into().unwrap(),
             self.height.try_into().unwrap(),
-            image::imageops::FilterType::Lanczos3);
+            image::imageops::FilterType::Lanczos3,
+        );
 
         for (idx, pixel) in buffer.pixels().into_iter().enumerate() {
             self.grid[idx].set_material(choose_closest_material(pixel));
@@ -199,17 +216,24 @@ impl Simulation {
                     }
                 }
                 InsertMode::Source => {
-                    self.sources.insert(idx, Source {
-                        material: self.material,
-                        rate: self.insert_rate,
-                        last_inserted: 0
-                    });
+                    self.sources.insert(
+                        idx,
+                        Source {
+                            material: self.material,
+                            rate: self.insert_rate,
+                            last_inserted: 0,
+                        },
+                    );
                 }
             }
         }
     }
 
     fn update(&mut self) {
+        if self.paused {
+            return;
+        }
+
         let mut rng = rand::thread_rng();
         let mut moved = HashMap::new();
         for order_idx in 0..self.order.len() {
@@ -235,7 +259,7 @@ impl Simulation {
     }
 
     fn density_at(&self, x: i32, y: i32) -> Option<f32> {
-        if let Some(particle) = self.particle_at(x,y) {
+        if let Some(particle) = self.particle_at(x, y) {
             Some(particle.density)
         } else {
             None
@@ -243,7 +267,7 @@ impl Simulation {
     }
 
     fn material_at(&self, x: i32, y: i32) -> Option<Material> {
-        if let Some(particle) = self.particle_at(x,y) {
+        if let Some(particle) = self.particle_at(x, y) {
             Some(particle.material)
         } else {
             None
@@ -251,7 +275,7 @@ impl Simulation {
     }
 
     fn energy_at(&self, x: i32, y: i32) -> Option<usize> {
-        if let Some(particle) = self.particle_at(x,y) {
+        if let Some(particle) = self.particle_at(x, y) {
             Some(particle.energy)
         } else {
             None
@@ -281,7 +305,7 @@ impl Simulation {
         }
         false
     }
-    
+
     fn set_on_fire(&mut self, x: i32, y: i32) {
         // Keep other particle properties - just change the material and color
         let idx = y as usize * self.width + x as usize;
@@ -296,8 +320,13 @@ impl Simulation {
             }
         }
     }
-        
-    fn update_tile(&mut self, order_idx: usize, rng: &mut ThreadRng, moved: &mut HashMap<usize, usize>) {
+
+    fn update_tile(
+        &mut self,
+        order_idx: usize,
+        rng: &mut ThreadRng,
+        moved: &mut HashMap<usize, usize>,
+    ) {
         let idx = self.order[order_idx];
 
         // 0,0 is top left
@@ -313,7 +342,7 @@ impl Simulation {
             self.try_set_on_fire(x, y + 1);
             self.try_set_on_fire(x - 1, y);
             self.try_set_on_fire(x + 1, y);
-            
+
             if energy > 0 {
                 self.grid[idx].energy -= 1;
             }
@@ -321,7 +350,6 @@ impl Simulation {
                 self.grid[idx].set_material(Material::Air);
             }
             return;
-
         } else if energy > 0 && self.neighbour_on_fire(x, y) {
             self.set_on_fire(x, y);
             return;
@@ -342,10 +370,10 @@ impl Simulation {
             if density_below > density {
                 if self.try_swap(idx, x, y - 1, moved, 1) {
                     return;
-                } 
+                }
             }
         }
-        
+
         if this_viscosity > 2 {
             for i in 0..this_viscosity {
                 if choice {
@@ -437,7 +465,14 @@ impl Simulation {
         }
     }
 
-    fn try_swap(&mut self, from_idx: usize, to_x: i32, to_y: i32, moved: &mut HashMap<usize, usize>, distance: usize) -> bool {
+    fn try_swap(
+        &mut self,
+        from_idx: usize,
+        to_x: i32,
+        to_y: i32,
+        moved: &mut HashMap<usize, usize>,
+        distance: usize,
+    ) -> bool {
         if self.grid[from_idx].material == Material::Rock {
             return false;
         }
@@ -449,8 +484,14 @@ impl Simulation {
 
         let to_idx = to_y as usize * self.width + to_x as usize;
 
-        let from_moved = match moved.get(&from_idx) { Some(c) => *c, None => 0 };
-        let to_moved = match moved.get(&to_idx) { Some(c) => *c, None => 0 };
+        let from_moved = match moved.get(&from_idx) {
+            Some(c) => *c,
+            None => 0,
+        };
+        let to_moved = match moved.get(&to_idx) {
+            Some(c) => *c,
+            None => 0,
+        };
         if from_moved < self.grid[from_idx].viscosity && to_moved < self.grid[to_idx].viscosity {
             self.grid.swap(from_idx, to_idx);
             moved.insert(from_idx, from_moved + distance);
@@ -465,7 +506,11 @@ impl Simulation {
         let y: usize = pos.y.try_into().unwrap();
         let x: usize = pos.x.try_into().unwrap();
         let idx: usize = y * self.width + x;
-        self.grid[idx].color
+        if self.show_materials {
+            get_material_color(self.grid[idx].material, self.grid[idx].alpha)
+        } else {
+            self.grid[idx].color
+        }
     }
 }
 
@@ -503,7 +548,8 @@ fn pixel_to_color(pixel: &image::Rgba<u8>) -> Color {
         rgba[0] as f32 / 255.0,
         rgba[1] as f32 / 255.0,
         rgba[2] as f32 / 255.0,
-        rgba[3] as f32 / 255.0)
+        rgba[3] as f32 / 255.0,
+    )
 }
 
 fn color_diff(color: Color, pixel: &image::Rgba<u8>) -> f32 {
@@ -544,12 +590,13 @@ fn main() {
                         title: "Particles".into(),
                         resolution: (x_f, y_f).into(),
                         resizable: false,
-                        .. default()
+                        ..default()
                     }),
-                    .. default()
+                    ..default()
                 })
                 .build(),
-            PixelBufferPlugin))
+            PixelBufferPlugin,
+        ))
         .add_systems(Startup, (setup, pixel_buffer_setup(size)))
         // .insert_resource(Time::<Fixed>::from_seconds(0.01))
         // .add_systems(FixedUpdate, update)
@@ -565,21 +612,19 @@ fn update(mut pb: QueryPixelBuffer, mut simulation: ResMut<Simulation>) {
     pb.frame().per_pixel(|pos, _| simulation.get_color(pos));
 }
 
-fn file_drop(
-    mut evr_dnd: EventReader<FileDragAndDrop>,
-    mut simulation: ResMut<Simulation>
-) {
+fn file_drop(mut evr_dnd: EventReader<FileDragAndDrop>, mut simulation: ResMut<Simulation>) {
     for ev in evr_dnd.read() {
-        if let FileDragAndDrop::DroppedFile { window: _, path_buf } = ev {
+        if let FileDragAndDrop::DroppedFile {
+            window: _,
+            path_buf,
+        } = ev
+        {
             simulation.set_picture(path_buf);
         }
     }
 }
 
-fn keyboard_input(
-    mut simulation: ResMut<Simulation>,
-    keys: Res<ButtonInput<KeyCode>>,
-) {
+fn keyboard_input(mut simulation: ResMut<Simulation>, keys: Res<ButtonInput<KeyCode>>) {
     if keys.just_pressed(KeyCode::Space) {
         simulation.set_all();
     }
@@ -608,6 +653,12 @@ fn keyboard_input(
     }
     if keys.just_pressed(KeyCode::KeyC) {
         simulation.clear_sources();
+    }
+    if keys.just_pressed(KeyCode::KeyP) {
+        simulation.toggle_paused();
+    }
+    if keys.just_pressed(KeyCode::KeyM) {
+        simulation.toggle_show_materials();
     }
     if keys.just_pressed(KeyCode::Enter) {
         simulation.reset_random();
