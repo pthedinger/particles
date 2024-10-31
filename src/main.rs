@@ -475,7 +475,7 @@ fn get_material_color(material: Material, alpha: f32) -> Color {
         Material::Fire => Color::srgba(1.0, 0.0, 0.0, 0.5 + alpha * 0.5),
         Material::Gas => Color::srgba(0.2, 0.8, 0.1, 0.5 + alpha * 0.5),
         Material::Air => Color::srgba(0.0, 0.0, 0.0, alpha * 0.5),
-        Material::Oil => Color::srgba(0.5, 0.5, 0.5, 0.7 + alpha * 0.3),
+        Material::Oil => Color::srgba(0.3, 0.3, 0.3, 0.3 + alpha * 0.3),
         Material::Water => Color::srgba(0.0, 0.0, 1.0, 0.5 + alpha * 0.5),
         Material::Sand => Color::srgba(1.0, 1.0, 0.1, 0.5 + alpha * 0.5),
         Material::Rock => Color::srgba(1.0, 1.0, 1.0, 0.3 + alpha * 0.5),
@@ -486,15 +486,14 @@ fn choose_closest_material(pixel: &image::Rgba<u8>) -> Material {
     let mut closest_material = Material::Air;
     let mut min = f32::MAX;
     for material in Material::iter() {
-        let diff = color_diff(get_material_color(material, 0.5), pixel);
+        let color = get_material_color(material, 0.5);
+        let diff = color_diff(color, pixel);
         if diff < min {
             min = diff;
             closest_material = material;
         }
     }
 
-    // let rgba = pixel.to_rgba();
-    // println!("{}, {}, {}, {} -> {:?}", rgba[0], rgba[1], rgba[2], rgba[3], closest_material);
     closest_material
 }
 
@@ -515,7 +514,13 @@ fn color_diff(color: Color, pixel: &image::Rgba<u8>) -> f32 {
     let gd = a.green - b.green;
     let bd = a.blue - b.blue;
     let ad = a.alpha - b.alpha;
-    (rd * rd) + (gd * gd) + (bd * bd) + (ad * ad)
+
+    // Take into account human eye sensitivity
+    if (a.red + b.red)/2.0 < 0.5 {
+        2.0*(rd * rd) + 4.0*(gd * gd) + 3.0*(bd * bd) + (ad * ad)
+    } else {
+        3.0*(rd * rd) + 4.0*(gd * gd) + 2.0*(bd * bd) + (ad * ad)
+    }
 }
 
 fn setup(mut commands: Commands) {
