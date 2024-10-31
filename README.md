@@ -23,6 +23,6 @@ While the simulator is running the following commands are supported:
  - `Enter` to reset the simulation to random materials
  - `[1-9]` to control the speed of insertion of `Sources` added
  - `m` to switch between image colors / `Material` view
- - `p` to pause the Simulation
+ - `p` to pause/unpause the Simulation
  - `Left-Mouse` to insert `Material` / `Sources`
  - `Drag-and-drop` an image to have it loaded into the simulation

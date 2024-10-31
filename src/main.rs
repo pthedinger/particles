@@ -598,12 +598,10 @@ fn main() {
             PixelBufferPlugin,
         ))
         .add_systems(Startup, (setup, pixel_buffer_setup(size)))
-        // .insert_resource(Time::<Fixed>::from_seconds(0.01))
-        // .add_systems(FixedUpdate, update)
-        .add_systems(Update, update)
-        .add_systems(Update, keyboard_input)
-        .add_systems(Update, mouse_button_input)
-        .add_systems(Update, file_drop)
+        .add_systems(
+            Update,
+            (update, keyboard_input, mouse_button_input, file_drop),
+        )
         .run();
 }
 
