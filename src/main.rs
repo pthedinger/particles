@@ -48,7 +48,7 @@ struct Particle {
     alpha: f32,
     energy: usize,
     density: f32,
-    viscosity: usize,
+    viscosity: f32,
     color: Color,
 }
 
@@ -59,7 +59,7 @@ impl Default for Particle {
             alpha: 0.0,
             energy: 0,
             density: 1.0,
-            viscosity: 1,
+            viscosity: 1.0,
             color: Color::srgba(0.0, 0.0, 0.0, 0.0),
         }
     }
@@ -91,13 +91,13 @@ impl Particle {
             Material::Rock => 2.0,
         };
         self.viscosity = match material {
-            Material::Fire => 10,
-            Material::Gas => 6,
-            Material::Air => 5,
-            Material::Water => 4,
-            Material::Oil => 4,
-            Material::Sand => 1,
-            Material::Rock => 0,
+            Material::Fire => 10.0,
+            Material::Gas => 6.0,
+            Material::Air => 5.0,
+            Material::Water => 4.0,
+            Material::Oil => 4.0,
+            Material::Sand => 1.0,
+            Material::Rock => 0.0,
         };
     }
 }
@@ -325,7 +325,7 @@ impl Simulation {
         &mut self,
         order_idx: usize,
         rng: &mut ThreadRng,
-        moved: &mut HashMap<usize, usize>,
+        moved: &mut HashMap<usize, f32>,
     ) {
         let idx = self.order[order_idx];
 
@@ -375,11 +375,11 @@ impl Simulation {
         }
 
         let delta_x = if choice { -1 } else { 1 };
-        if this_viscosity > 2 {
-            for i in 0..this_viscosity {
+        if this_viscosity > 2.0 {
+            for i in 0..this_viscosity as usize {
                 if let Some(particle_left) = self.particle_at(x + delta_x, y) {
                     if material != particle_left.material {
-                        if particle_left.viscosity > 4 {
+                        if particle_left.viscosity > 4.0 {
                             if self.try_swap(idx, x + delta_x, y, moved, i) {
                                 return;
                             }
@@ -390,9 +390,9 @@ impl Simulation {
             }
         }
 
-        if this_viscosity > 1 {
+        if this_viscosity > 1.0 {
             if let Some(particle_left) = self.particle_at(x + delta_x, y) {
-                if particle_left.viscosity > 1 && material != particle_left.material {
+                if particle_left.viscosity > 1.0 && material != particle_left.material {
                     if self.try_swap(idx, x + delta_x, y, moved, 1) {
                         return;
                     }
@@ -426,32 +426,29 @@ impl Simulation {
         from_idx: usize,
         to_x: i32,
         to_y: i32,
-        moved: &mut HashMap<usize, usize>,
+        moved: &mut HashMap<usize, f32>,
         distance: usize,
     ) -> bool {
-        if self.grid[from_idx].material == Material::Rock {
+        let to_idx = to_y as usize * self.width + to_x as usize;
+        if self.grid[from_idx].material == Material::Rock
+            || self.grid[to_idx].material == Material::Rock
+        {
             return false;
         }
-        if let Some(material) = self.material_at(to_x, to_y) {
-            if material == Material::Rock {
-                return false;
-            }
-        }
-
-        let to_idx = to_y as usize * self.width + to_x as usize;
 
         let from_moved = match moved.get(&from_idx) {
             Some(c) => *c,
-            None => 0,
+            None => 0.0,
         };
         let to_moved = match moved.get(&to_idx) {
             Some(c) => *c,
-            None => 0,
+            None => 0.0,
         };
+        let average_density = (self.grid[from_idx].density + self.grid[to_idx].density) / 2.0;
         if from_moved < self.grid[from_idx].viscosity && to_moved < self.grid[to_idx].viscosity {
             self.grid.swap(from_idx, to_idx);
-            moved.insert(from_idx, from_moved + distance);
-            moved.insert(to_idx, to_moved + distance);
+            moved.insert(from_idx, from_moved + (average_density * distance as f32));
+            moved.insert(to_idx, to_moved + (average_density * distance as f32));
             true
         } else {
             false
@@ -516,10 +513,10 @@ fn color_diff(color: Color, pixel: &image::Rgba<u8>) -> f32 {
     let ad = a.alpha - b.alpha;
 
     // Take into account human eye sensitivity
-    if (a.red + b.red)/2.0 < 0.5 {
-        2.0*(rd * rd) + 4.0*(gd * gd) + 3.0*(bd * bd) + (ad * ad)
+    if (a.red + b.red) / 2.0 < 0.5 {
+        2.0 * (rd * rd) + 4.0 * (gd * gd) + 3.0 * (bd * bd) + (ad * ad)
     } else {
-        3.0*(rd * rd) + 4.0*(gd * gd) + 2.0*(bd * bd) + (ad * ad)
+        3.0 * (rd * rd) + 4.0 * (gd * gd) + 2.0 * (bd * bd) + (ad * ad)
     }
 }
 
