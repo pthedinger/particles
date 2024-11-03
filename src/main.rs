@@ -199,21 +199,27 @@ impl Simulation {
     }
 
     fn set_picture(&mut self, path: &PathBuf) {
-        let img = image::ImageReader::open(path).unwrap().decode().unwrap();
-        let buffer: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> = image::imageops::resize(
-            &img,
-            self.width.try_into().unwrap(),
-            self.height.try_into().unwrap(),
-            image::imageops::FilterType::Lanczos3,
-        );
+        match image::ImageReader::open(path).unwrap().decode() {
+            Ok(img) => {
+                let buffer: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> = image::imageops::resize(
+                    &img,
+                    self.width.try_into().unwrap(),
+                    self.height.try_into().unwrap(),
+                    image::imageops::FilterType::Lanczos3,
+                );
 
-        for (idx, pixel) in buffer.pixels().into_iter().enumerate() {
-            self.grid[idx].set_material(choose_closest_material(pixel));
+                for (idx, pixel) in buffer.pixels().into_iter().enumerate() {
+                    self.grid[idx].set_material(choose_closest_material(pixel));
 
-            // Keep the original image color
-            self.grid[idx].color = pixel_to_color(&pixel);
+                    // Keep the original image color
+                    self.grid[idx].color = pixel_to_color(&pixel);
+                }
+                self.show_materials = false;
+            }
+            Err(error) => {
+                println!("ERROR: Unsupported image {path:?}: {error:?}");
+            }
         }
-        self.show_materials = false;
     }
 
     fn insert(&mut self, x: usize, y: usize) {
