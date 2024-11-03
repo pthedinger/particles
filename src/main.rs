@@ -168,6 +168,16 @@ impl Simulation {
         self.sources.clear();
     }
 
+    fn flip(&mut self) {
+        for y in 0..(self.height / 2) {
+            for x in 0..self.width {
+                let top_idx = y * self.width + x;
+                let bottom_idx = (self.height - y - 1) * self.width + x;
+                self.grid.swap(top_idx, bottom_idx);
+            }
+        }
+    }
+
     fn toggle_paused(&mut self) {
         self.paused = !self.paused;
     }
@@ -609,6 +619,9 @@ fn keyboard_input(mut simulation: ResMut<Simulation>, keys: Res<ButtonInput<KeyC
     }
     if keys.just_pressed(KeyCode::KeyC) {
         simulation.clear_sources();
+    }
+    if keys.just_pressed(KeyCode::KeyF) {
+        simulation.flip();
     }
     if keys.just_pressed(KeyCode::KeyP) {
         simulation.toggle_paused();
