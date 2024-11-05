@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_pixel_buffer::prelude::*;
 use core::f32;
+use std::cmp::min;
 use image;
 use image::Pixel;
 use rand::prelude::*;
@@ -11,9 +12,9 @@ use std::path::PathBuf;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
-const GRID_WIDTH: usize = 320;
-const GRID_HEIGHT: usize = 150;
-const PIXEL_SIZE: usize = 4;
+const GRID_WIDTH: usize = 400;
+const GRID_HEIGHT: usize = 200;
+const MIN_PIXEL_SIZE: usize = 2;
 
 // Order is important - lighter at the top
 #[derive(Debug, Clone, Copy, PartialEq, EnumIter)]
@@ -115,7 +116,10 @@ struct Source {
 #[derive(Resource)]
 struct Simulation {
     width: usize,
+    max_width: usize,
     height: usize,
+    max_height: usize,
+    pixel_size: usize,
     grid: Vec<Particle>,
     order: Vec<usize>,
     sources: HashMap<usize, Source>,
@@ -127,7 +131,7 @@ struct Simulation {
 }
 
 impl Simulation {
-    fn new(width: usize, height: usize) -> Self {
+    fn new(width: usize, height: usize, pixel_size: usize) -> Self {
         let mut rng = rand::thread_rng();
         let mut rng_alpha = rand::thread_rng();
         let grid = (0..width * height)
@@ -138,8 +142,11 @@ impl Simulation {
         order.shuffle(&mut rng);
 
         Self {
+            max_width: width*pixel_size,
             width,
+            max_height: height*pixel_size,
             height,
+            pixel_size,
             grid,
             order,
             sources: HashMap::new(),
@@ -162,6 +169,48 @@ impl Simulation {
         for idx in 0..self.width * self.height {
             self.grid[idx].set_material(choose_random_material(&mut rng));
         }
+    }
+
+    fn increase_pixel_size(&mut self) {
+        if self.pixel_size < min(self.max_width, self.max_height) - 1 {
+            self.pixel_size += 1;
+            self.resize_grid();
+        }
+    }
+
+    fn decrease_pixel_size(&mut self) {
+        if self.pixel_size > MIN_PIXEL_SIZE {
+            self.pixel_size -= 1;
+            self.resize_grid();
+        }
+    }
+
+    fn resize_grid(&mut self) {
+        let mut rng = rand::thread_rng();
+        let mut rng_alpha = rand::thread_rng();
+        let width = self.max_width / self.pixel_size;
+        let height = self.max_height / self.pixel_size;
+
+        let mut grid = Vec::new();
+        for y in 0..width as i32 {
+            for x in 0..height as i32 {
+                match self.particle_at(x, y) {
+                    Some(particle) => {
+                        grid.push(Particle::new(particle.material, particle.alpha));
+                    }
+                    None => {
+                        let material = choose_random_material(&mut rng);
+                        let alpha = choose_alpha(&mut rng_alpha);
+                        grid.push(Particle::new(material, alpha));
+                    }
+                }
+            }
+        }
+        self.grid = grid;
+        self.order = (0..width * height).map(|v| v).collect();
+        self.order.shuffle(&mut rng);
+        self.width = width;
+        self.height = height;
     }
 
     fn clear_sources(&mut self) {
@@ -473,12 +522,18 @@ impl Simulation {
 
     fn get_color(&self, pos: UVec2) -> Color {
         let y: usize = pos.y.try_into().unwrap();
+        let y = y / self.pixel_size;
         let x: usize = pos.x.try_into().unwrap();
+        let x = x / self.pixel_size;
         let idx: usize = y * self.width + x;
-        if self.show_materials {
-            get_material_color(self.grid[idx].material, self.grid[idx].alpha)
+        if idx < self.grid.len() {
+            if self.show_materials {
+                get_material_color(self.grid[idx].material, self.grid[idx].alpha)
+            } else {
+                self.grid[idx].color
+            }
         } else {
-            self.grid[idx].color
+            Color::srgba(0.0, 0.0, 0.0, 0.0)
         }
     }
 }
@@ -539,18 +594,19 @@ fn color_diff(color: Color, pixel: &image::Rgba<u8>) -> f32 {
 fn setup(mut commands: Commands) {
     let width = GRID_WIDTH;
     let height = GRID_HEIGHT;
+    let pixel_size = MIN_PIXEL_SIZE;
 
-    let simulation = Simulation::new(width, height);
+    let simulation = Simulation::new(width, height, pixel_size);
     commands.insert_resource(simulation);
 }
 
 fn main() {
-    let x = GRID_WIDTH.try_into().unwrap();
-    let y = GRID_HEIGHT.try_into().unwrap();
-    let pixel_size: u32 = PIXEL_SIZE.try_into().unwrap();
+    let pixel_size: u32 = MIN_PIXEL_SIZE.try_into().unwrap();
+    let x: u32 = GRID_WIDTH.try_into().unwrap();
+    let y: u32 = GRID_HEIGHT.try_into().unwrap();
     let size = PixelBufferSize {
-        size: UVec2::new(x, y),
-        pixel_size: UVec2::new(pixel_size, pixel_size),
+        size: UVec2::new(x * pixel_size, y * pixel_size),
+        pixel_size: UVec2::new(1, 1),
     };
 
     let x_f = (x * pixel_size) as f32;
@@ -626,7 +682,7 @@ fn keyboard_input(mut simulation: ResMut<Simulation>, keys: Res<ButtonInput<KeyC
     if keys.just_pressed(KeyCode::KeyC) {
         simulation.clear_sources();
     }
-    if keys.just_pressed(KeyCode::KeyF) {
+    if keys.just_pressed(KeyCode::KeyU) {
         simulation.flip();
     }
     if keys.just_pressed(KeyCode::KeyP) {
@@ -637,6 +693,13 @@ fn keyboard_input(mut simulation: ResMut<Simulation>, keys: Res<ButtonInput<KeyC
     }
     if keys.just_pressed(KeyCode::Enter) {
         simulation.reset_random();
+    }
+
+    if keys.just_pressed(KeyCode::BracketLeft) {
+        simulation.decrease_pixel_size();
+    }
+    if keys.just_pressed(KeyCode::BracketRight) {
+        simulation.increase_pixel_size();
     }
 
     if keys.just_pressed(KeyCode::Digit1) {
@@ -675,8 +738,8 @@ fn mouse_button_input(
 ) {
     if buttons.pressed(MouseButton::Left) {
         if let Some(position) = q_windows.single().cursor_position() {
-            let x = position.x as usize / PIXEL_SIZE;
-            let y = position.y as usize / PIXEL_SIZE;
+            let x = position.x as usize / simulation.pixel_size;
+            let y = position.y as usize / simulation.pixel_size;
             simulation.insert(x, y);
         }
     }
