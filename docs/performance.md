@@ -1,5 +1,7 @@
 # Measured performance
 
+The initial measurements below precede the grain-sticking correction. The follow-up validation at the end records the corrected version.
+
 Measured 2026-11-09 on this development machine: macOS / Apple Silicon (aarch64), Rust 1.90.0, Bevy 0.14.2. Results describe this host under its current load. The application uses a release build, a 1/120-second fixed step and two constraint iterations. The default window is 1360 × 900 logical pixels; the captured Retina render is 2720 × 1800.
 
 ## Default application
@@ -51,3 +53,12 @@ Particle count and mixture remain unchanged when the app slows down. At most fou
 Raw results are in [benchmarks](benchmarks/). The reproducible commands and controls are in the [README](../README.md).
 
 ![Final rendered vessel](screenshots/sand-art.png)
+
+
+## Follow-up: grain-contact correction
+
+The corrected solver removes three sources of artificial sticking: friction across a gap, solid-to-solid viscous coupling, and negative fluid pressure pulling grains together. Friction is now bounded by actual compressive contact load. No material friction defaults were reduced to conceal these causes.
+
+The full release suite now passes **27 tests**, including five additional grain cases: unloaded gap, barely loaded contact, noncontact dry viscosity, loaded-contact friction, and isolated fluid-mediated attraction. The four defect cases were observed failing before their fixes; the loaded-contact guard verifies that sand still has friction under load. Formatting and all-target compilation also pass. A focused independent review approved the contact-load accounting and identified no new actionable issue; it also confirmed the tensile fluid-pressure path.
+
+A fresh 900-frame scripted application run at **3,000 particles** measured **8.334 ms median / 120.0 FPS**, **8.467 ms p95**, and **3.163 ms median physics per displayed frame** after warm-up. All particles remained finite and contained; 0.050 seconds of cumulative startup/lag time were reported. See the [raw follow-up report](benchmarks/2026-11-09-grain-contact-fix.txt). The larger-count results above were not rerun for this correction.

@@ -28,3 +28,12 @@ The reviewer declined quantitative CFD accuracy/conservation after deliberate cl
 ## Existing user changes
 
 Only the newly required direct `glam` dependency entry was staged from Cargo.lock. The user's pre-existing lockfile updates remain uncommitted. The original main source is preserved in the legacy example. The untracked `a.out` and `tmp.c` files were left untouched.
+
+
+## Grain-sticking follow-up
+
+The user's observation that solids stuck together led to isolated behavior tests. The old near-contact friction removed roughly two thirds of sideways relative speed even across a visible gap or with negligible compressive load. A separate solid-solid viscosity path coupled dry, noncontact grains. Finally, a single under-filled liquid parcel pulled two noncontacting, equal-density grains inward without viscosity or explicit surface tension.
+
+The solver now records actual grain-contact positional corrections and uses their normal load to cap friction, preserving pair momentum and preventing reversal of tangential slip. Viscosity skips solid-solid pairs. Density constraints resist compression only; explicit fluid/gas cohesion stays separate from pressure. No defaults were weakened to hide the defects. Independent review approved the contact accounting and confirmed the residual tensile pressure mechanism before its one-line correction.
+
+All 27 tests pass, including the existing settling and dense-mixture checks. The updated windowed test still measures about 120 FPS at the default 3,000 particles.

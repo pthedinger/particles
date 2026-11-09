@@ -19,6 +19,13 @@ pub struct Motion {
     pub shake: Vec2,
 }
 
+struct GrainContact {
+    i: usize,
+    j: usize,
+    normal: Vec2,
+    relative_correction: f32,
+}
+
 /// CPU data stays separate from rendering/ECS; neighbor storage is reused each step.
 pub struct Simulation {
     pub particles: Vec<Particle>,
@@ -40,6 +47,7 @@ pub struct Simulation {
     heads: Vec<i32>,
     next: Vec<i32>,
     pairs: Vec<(usize, usize)>,
+    contacts: Vec<GrainContact>,
     support: f32,
     side: usize,
 }
@@ -103,12 +111,13 @@ impl Simulation {
             heads: Vec::new(),
             next: Vec::new(),
             pairs: Vec::new(),
+            contacts: Vec::new(),
             support: base_radius * 4.4,
             side: 0,
         };
         sim.prepare();
         for _ in 0..24 {
-            sim.constraints();
+            sim.constraints(false);
         }
         Ok(sim)
     }
@@ -273,7 +282,7 @@ impl Simulation {
         }
     }
 
-    fn constraints(&mut self) {
+    fn constraints(&mut self, record_contacts: bool) {
         self.neighbors();
         self.density.copy_from_slice(&self.volume);
         self.gradient.fill(Vec2::ZERO);
@@ -295,7 +304,9 @@ impl Simulation {
         }
         for i in 0..self.particles.len() {
             let phase = self.materials[self.particles[i].material].phase;
-            let c = (self.density[i] / rest - 1.0).max(-0.015);
+            // Pressure resists compression; negative pressure would pull grains
+            // together through sparse fluid. Phase cohesion is handled below.
+            let c = (self.density[i] / rest - 1.0).max(0.0);
             let stiffness = match phase {
                 Phase::Liquid => 1.0,
                 Phase::Gas => 0.25,
@@ -363,6 +374,16 @@ impl Simulation {
                 let cj = dir * (overlap * (1.0 - wi) * 0.95).min(self.particles[j].radius * 0.4);
                 self.particles[i].position += ci;
                 self.particles[j].position -= cj;
+                if record_contacts && a == Phase::Solid && b == Phase::Solid {
+                    // The position solve supplies the actual compressive load.
+                    // Keep it for Coulomb friction after reconstructing velocities.
+                    self.contacts.push(GrainContact {
+                        i,
+                        j,
+                        normal: dir,
+                        relative_correction: (ci + cj).dot(dir),
+                    });
+                }
             }
         }
         for p in &mut self.particles {
@@ -407,8 +428,9 @@ impl Simulation {
             p.velocity = p.velocity.clamp_length_max(speed_limit);
             p.position += p.velocity * dt;
         }
+        self.contacts.clear();
         for _ in 0..ITERATIONS {
-            self.constraints();
+            self.constraints(true);
         }
         for (i, p) in self.particles.iter_mut().enumerate() {
             p.velocity = ((p.position - self.previous[i]) / dt).clamp_length_max(speed_limit);
@@ -422,24 +444,45 @@ impl Simulation {
                 }
             }
         }
-        // Pairwise viscosity and dry friction exchange equal/opposite impulses.
+        // Fluid viscosity may couple fluid/fluid and fluid/grain motion.
+        // Dry grains have no viscous connection to nearby, noncontacting grains.
         for k in 0..self.pairs.len() {
             let (i, j) = self.pairs[k];
-            let (normal, r) = self.direction(i, j);
             let a = &self.materials[self.particles[i].material];
             let b = &self.materials[self.particles[j].material];
+            if a.phase == Phase::Solid && b.phase == Phase::Solid {
+                continue;
+            }
+            let r = self.particles[i]
+                .position
+                .distance(self.particles[j].position);
             let rel = self.particles[i].velocity - self.particles[j].velocity;
             let wi = self.inverse_mass[i] / (self.inverse_mass[i] + self.inverse_mass[j]);
             let q = (1.0 - r / self.support).max(0.0);
-            let mut impulse = rel * (dt * (a.viscosity + b.viscosity) * q * 2.0).min(0.08);
-            if a.phase == Phase::Solid
-                && b.phase == Phase::Solid
-                && r < (self.particles[i].radius + self.particles[j].radius) * 1.05
-            {
-                let closing = rel.dot(normal).min(0.0);
-                impulse += normal * closing
-                    + (rel - normal * rel.dot(normal)) * (a.friction * b.friction).sqrt() * 0.65;
-            }
+            let impulse = rel * (dt * (a.viscosity + b.viscosity) * q * 2.0).min(0.08);
+            self.particles[i].velocity -= impulse * wi;
+            self.particles[j].velocity += impulse * (1.0 - wi);
+        }
+        // Friction requires an actual contact and is capped by its normal load.
+        // A grazing or separating grain must be able to slide free of a cluster.
+        for contact in &self.contacts {
+            let (i, j) = (contact.i, contact.j);
+            let normal = contact.normal;
+            let a = &self.materials[self.particles[i].material];
+            let b = &self.materials[self.particles[j].material];
+            let rel = self.particles[i].velocity - self.particles[j].velocity;
+            let closing = rel.dot(normal).min(0.0);
+            let tangent = rel - normal * rel.dot(normal);
+            let slip = tangent.length();
+            let normal_load = contact.relative_correction / dt - closing;
+            let friction_limit = (a.friction * b.friction).sqrt() * normal_load;
+            let friction = if slip > 1e-6 {
+                tangent * (friction_limit / slip).min(1.0)
+            } else {
+                Vec2::ZERO
+            };
+            let impulse = normal * closing + friction;
+            let wi = self.inverse_mass[i] / (self.inverse_mass[i] + self.inverse_mass[j]);
             self.particles[i].velocity -= impulse * wi;
             self.particles[j].velocity += impulse * (1.0 - wi);
         }

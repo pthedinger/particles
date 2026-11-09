@@ -194,3 +194,113 @@ fn sand_heavier_than_water_sinks_in_a_dense_vessel() {
         "grains should sink below liquid: grain {grain_mean}, water {water_mean}"
     );
 }
+
+fn sliding_grains(gap_factor: f32, friction: f32, viscosity: f32) -> Simulation {
+    let mut recipe = Recipe::balanced();
+    recipe.budget = 100;
+    let mut sim = Simulation::new(&recipe).unwrap();
+    sim.materials[3].friction = friction;
+    sim.materials[3].viscosity = viscosity;
+    let radius = sim.base_radius;
+    sim.particles = vec![
+        Particle {
+            position: Vec2::new(-radius * gap_factor, 0.0),
+            velocity: Vec2::new(0.0, 0.1),
+            material: 3,
+            radius,
+        },
+        Particle {
+            position: Vec2::new(radius * gap_factor, 0.0),
+            velocity: Vec2::new(0.0, -0.1),
+            material: 3,
+            radius,
+        },
+    ];
+    sim
+}
+
+#[test]
+fn grains_with_a_gap_do_not_apply_dry_friction() {
+    // The surfaces are 4% of a diameter apart: there is no normal load.
+    let mut sim = sliding_grains(1.04, 1.0, 0.0);
+    sim.step(1.0 / 120.0, Motion::default());
+    let slip = (sim.particles[0].velocity.y - sim.particles[1].velocity.y).abs();
+    assert!(
+        slip > 0.18,
+        "unloaded grains locked together: relative speed {slip}"
+    );
+}
+
+#[test]
+fn dry_grains_do_not_viscously_lock_without_fluid() {
+    // Well beyond contact; a grain's fluid-drag setting cannot glue dry neighbors.
+    let mut sim = sliding_grains(1.5, 0.0, 8.0);
+    for _ in 0..6 {
+        sim.step(1.0 / 120.0, Motion::default());
+    }
+    let slip = (sim.particles[0].velocity.y - sim.particles[1].velocity.y).abs();
+    assert!(
+        slip > 0.18,
+        "noncontact grain viscosity coupled their motion: {slip}"
+    );
+}
+
+#[test]
+fn loaded_grain_contacts_still_resist_sliding() {
+    let mut sim = sliding_grains(0.95, 1.0, 0.0);
+    sim.step(1.0 / 120.0, Motion::default());
+    let slip = (sim.particles[0].velocity.y - sim.particles[1].velocity.y).abs();
+    assert!(slip < 0.1, "loaded contact should have friction: {slip}");
+}
+
+#[test]
+fn barely_loaded_grains_do_not_lose_most_of_their_slip() {
+    let mut sim = sliding_grains(0.9999, 1.0, 0.0);
+    sim.step(1.0 / 120.0, Motion::default());
+    let slip = (sim.particles[0].velocity.y - sim.particles[1].velocity.y).abs();
+    assert!(
+        slip > 0.18,
+        "tiny normal load caused excessive friction: {slip}"
+    );
+}
+
+#[test]
+fn sparse_fluid_pressure_does_not_pull_noncontacting_grains_together() {
+    let mut recipe = Recipe::balanced();
+    recipe.budget = 100;
+    let mut sim = Simulation::new(&recipe).unwrap();
+    for material in &mut sim.materials {
+        material.viscosity = 0.0;
+        material.friction = 0.0;
+        material.density = 1.0;
+    }
+    let radius = sim.base_radius;
+    let grain = |x| Particle {
+        position: Vec2::new(x, 0.0),
+        velocity: Vec2::ZERO,
+        material: 3,
+        radius,
+    };
+    sim.particles = vec![
+        grain(-1.9 * radius),
+        grain(1.9 * radius),
+        Particle {
+            position: Vec2::ZERO,
+            velocity: Vec2::ZERO,
+            material: 0,
+            radius,
+        },
+    ];
+    // No contact, density contrast, viscosity, or liquid/liquid surface tension.
+    let separation = sim.particles[0]
+        .position
+        .distance(sim.particles[1].position);
+    sim.step(1.0 / 120.0, Motion::default());
+    let after = sim.particles[0]
+        .position
+        .distance(sim.particles[1].position);
+    assert!(
+        after >= separation - 1e-6,
+        "fluid tension attracted grains: {separation} -> {after}"
+    );
+}
