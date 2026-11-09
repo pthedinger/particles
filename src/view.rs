@@ -5,7 +5,7 @@ use bevy_inspector_egui::{
     egui::{self, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke},
 };
 use particles::{
-    controls::{bounded_motion, view_to_world, FIXED_DT},
+    controls::view_to_world,
     material::{Phase, Recipe},
 };
 use std::time::Instant;
@@ -20,7 +20,7 @@ const FIELD_SIZE: usize = 320;
 pub struct FluidField {
     texture: Option<egui::TextureHandle>,
     dirty: bool,
-    weights: Vec<[f32; 5]>,
+    weights: Vec<[f32; 8]>,
     image: egui::ColorImage,
 }
 impl FluidField {
@@ -28,7 +28,7 @@ impl FluidField {
         Self {
             texture: None,
             dirty: true,
-            weights: vec![[0.0; 5]; FIELD_SIZE * FIELD_SIZE],
+            weights: vec![[0.0; 8]; FIELD_SIZE * FIELD_SIZE],
             image: egui::ColorImage::new([FIELD_SIZE, FIELD_SIZE], Color32::TRANSPARENT),
         }
     }
@@ -39,7 +39,7 @@ impl FluidField {
 
     fn update(&mut self, ctx: &egui::Context, sim: &particles::simulation::Simulation) {
         self.dirty = false;
-        self.weights.fill([0.0; 5]);
+        self.weights.fill([0.0; 8]);
         let scale = (FIELD_SIZE as f32 - 1.0) * 0.5;
         for p in &sim.particles {
             let material = &sim.materials[p.material];
@@ -62,6 +62,9 @@ impl FluidField {
                     let field = &mut self.weights[y * FIELD_SIZE + x];
                     if material.phase == Phase::Gas {
                         field[4] += weight;
+                        for c in 0..3 {
+                            field[5 + c] += material.color[c] as f32 * weight;
+                        }
                     } else {
                         for (c, sum) in field[..3].iter_mut().enumerate() {
                             *sum += material.color[c] as f32 * weight;
@@ -80,18 +83,27 @@ impl FluidField {
             }
             let liquid = field[3];
             let gas = field[4];
-            if liquid < 0.03 {
+            let liquid_coverage = ((liquid - 0.035) / 0.36).clamp(0.0, 1.0);
+            let gas_coverage = ((gas - 0.035) / 0.36).clamp(0.0, 1.0);
+            let bubble = (gas / (liquid + gas).max(0.001) * 1.5 - 0.2).clamp(0.0, 1.0);
+            let liquid_alpha = liquid_coverage * (1.0 - bubble);
+            let gas_alpha = gas_coverage * bubble * 0.7;
+            let alpha = (liquid_alpha + gas_alpha).min(1.0);
+            if alpha < 0.001 {
                 self.image.pixels[i] = Color32::TRANSPARENT;
                 continue;
             }
-            let coverage = ((liquid - 0.035) / 0.36).clamp(0.0, 1.0);
-            let bubble = (gas / (liquid + gas).max(0.001) * 1.5 - 0.2).clamp(0.0, 1.0);
-            let alpha = coverage * (1.0 - bubble);
             let light = 0.72 + 0.20 * (y + 1.0) * 0.5;
+            let channel = |c: usize| {
+                ((field[c] / liquid.max(0.001) * liquid_alpha * light
+                    + field[5 + c] / gas.max(0.001) * gas_alpha)
+                    / alpha)
+                    .clamp(0.0, 255.0) as u8
+            };
             self.image.pixels[i] = Color32::from_rgba_unmultiplied(
-                (field[0] / liquid * light) as u8,
-                (field[1] / liquid * light) as u8,
-                (field[2] / liquid * light) as u8,
+                channel(0),
+                channel(1),
+                channel(2),
                 (alpha * 255.0) as u8,
             );
         }
@@ -109,7 +121,7 @@ impl FluidField {
 
 pub fn run_ui(
     mut contexts: EguiContexts,
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut art: ResMut<Art>,
 ) {
@@ -131,7 +143,7 @@ pub fn run_ui(
     }
     let state = &mut *art;
     let elapsed = time.delta_seconds();
-    state.frame_ms += (elapsed * 1000.0 - state.frame_ms) * 0.08;
+
     if !ctx.wants_keyboard_input() {
         if keys.just_pressed(KeyCode::Space) {
             state.paused = !state.paused;
@@ -222,9 +234,6 @@ pub fn run_ui(
                 }
             }
             // Button hold and half-turn requests use the same bounded physical input path.
-            if state.turn_remaining > 0.0 {
-                desired_speed = 1.8;
-            }
             if state.options.scripted {
                 if (80..220).contains(&state.frames) {
                     desired_speed = 1.6;
@@ -234,31 +243,7 @@ pub fn run_ui(
                 }
                 state.paused = (370..400).contains(&state.frames);
             }
-            let steps = state.clock.advance(elapsed, state.paused);
-            let start = Instant::now();
-            for _ in 0..steps {
-                let target = if state.turn_remaining > 0.0 {
-                    desired_speed.min(state.turn_remaining / FIXED_DT)
-                } else {
-                    desired_speed
-                };
-                state.angular_speed +=
-                    (target - state.angular_speed).clamp(-8.0 * FIXED_DT, 8.0 * FIXED_DT);
-                let shake = if state.shake_remaining > 0.0 {
-                    state.shake_remaining = (state.shake_remaining - FIXED_DT).max(0.0);
-                    let t = state.simulation.time;
-                    glam::Vec2::new(7.0 * (t * 37.0).sin(), 4.5 * (t * 29.0).cos())
-                } else {
-                    glam::Vec2::ZERO
-                };
-                let motion = bounded_motion(state.angular_speed, shake);
-                state.simulation.step(FIXED_DT, motion);
-                if state.turn_remaining > 0.0 {
-                    state.turn_remaining =
-                        (state.turn_remaining - state.angular_speed.max(0.0) * FIXED_DT).max(0.0);
-                }
-            }
-            state.physics_ms = measured_ms(start);
+            state.desired_speed = desired_speed;
             let draw_start = Instant::now();
             draw_vessel(ui, ctx, state, center, radius);
             state.drawing_ms = measured_ms(draw_start);
@@ -612,4 +597,32 @@ fn draw_vessel(ui: &egui::Ui, ctx: &egui::Context, state: &mut Art, center: Pos2
     let marker = center + egui::vec2(a.cos(), -a.sin()) * (radius + 10.0);
     painter.circle_filled(marker, 4.0, CREAM);
     painter.circle_stroke(marker, 6.0, Stroke::new(1.0, GOLD));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn gas_colour_changes_visible_surface_pixels() {
+        let mut recipe = Recipe::balanced();
+        recipe.budget = 40;
+        let mut sim = particles::simulation::Simulation::new(&recipe).unwrap();
+        sim.particles.truncate(1);
+        sim.particles[0].material = 2;
+        sim.particles[0].position = glam::Vec2::ZERO;
+        sim.particles[0].radius = 0.15;
+        sim.materials[2].color = [220, 40, 60];
+        let mut field = FluidField::new();
+        let ctx = egui::Context::default();
+        field.update(&ctx, &sim);
+        let before = field.image.pixels[FIELD_SIZE / 2 * FIELD_SIZE + FIELD_SIZE / 2];
+        assert!(
+            before.a() > 0 && before.r() > before.g() + 80,
+            "gas tint was invisible: {before:?}"
+        );
+        sim.materials[2].color = [20, 200, 80];
+        field.update(&ctx, &sim);
+        let after = field.image.pixels[FIELD_SIZE / 2 * FIELD_SIZE + FIELD_SIZE / 2];
+        assert!(after.g() > after.r() + 80);
+    }
 }

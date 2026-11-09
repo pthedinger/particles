@@ -38,3 +38,26 @@ fn invalid_and_extreme_input_remains_bounded() {
     assert!(motion.angular_velocity.abs() <= 3.0);
     assert!(motion.shake.length() <= 12.001);
 }
+
+#[test]
+fn half_turn_brakes_at_exact_target_even_when_initially_moving() {
+    use particles::controls::{rotation_step, FIXED_DT};
+    for initial in [0.0, 1.6, -1.6] {
+        let mut speed = initial;
+        let mut remaining = std::f32::consts::PI;
+        let mut angle = 0.0;
+        for _ in 0..720 {
+            let desired = 0.0;
+            let previous = speed;
+            (speed, remaining) = rotation_step(speed, desired, remaining, FIXED_DT);
+            assert!((speed-previous).abs()<=8.0*FIXED_DT+0.0001,"initial {initial}, previous {previous}, speed {speed}, remaining {remaining}, angle {angle}");
+            angle += speed * FIXED_DT;
+        }
+        assert!(speed.abs() < 0.001);
+        assert!(
+            (angle - std::f32::consts::PI).abs() < 0.002,
+            "half-turn from {initial} ended at {} degrees",
+            angle.to_degrees()
+        );
+    }
+}

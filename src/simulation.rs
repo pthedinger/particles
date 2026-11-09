@@ -3,7 +3,7 @@ use glam::Vec2;
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
 
 pub const GRAVITY: Vec2 = Vec2::new(0.0, -1.8);
-const ITERATIONS: usize = 3;
+const ITERATIONS: usize = 2;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Particle {

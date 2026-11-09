@@ -48,3 +48,23 @@ pub fn bounded_motion(angular_velocity: f32, shake: Vec2) -> Motion {
         },
     }
 }
+
+/// Advances vessel speed and remaining requested half-turn angle.
+pub fn rotation_step(speed: f32, desired: f32, remaining: f32, dt: f32) -> (f32, f32) {
+    let acceleration = 8.0;
+    let target = if remaining > 0.0 {
+        // Reserve half the acceleration budget for discrete end-step rounding.
+        // This begins braking early enough to stop without an impulsive snap.
+        let braking_speed = (acceleration * remaining).sqrt();
+        braking_speed.min(1.8)
+    } else {
+        desired
+    };
+    let mut next = speed + (target - speed).clamp(-acceleration * dt, acceleration * dt);
+    if remaining > 0.0 {
+        next = next.min(remaining / dt);
+        (next, (remaining - next * dt).max(0.0))
+    } else {
+        (next, 0.0)
+    }
+}

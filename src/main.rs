@@ -6,7 +6,11 @@ use bevy::{
     window::{PresentMode, PrimaryWindow},
 };
 use bevy_inspector_egui::bevy_egui::EguiPlugin;
-use particles::{controls::Clock, material::Recipe, simulation::Simulation};
+use particles::{
+    controls::{bounded_motion, rotation_step, Clock, FIXED_DT},
+    material::Recipe,
+    simulation::Simulation,
+};
 use std::time::Instant;
 
 #[derive(Resource)]
@@ -18,6 +22,7 @@ pub struct Art {
     pub paused: bool,
     pub angular_speed: f32,
     pub button_turn: f32,
+    pub desired_speed: f32,
     pub turn_remaining: f32,
     pub shake_remaining: f32,
     pub drag_angle: Option<f32>,
@@ -117,6 +122,7 @@ fn main() {
             paused: false,
             angular_speed: 0.0,
             button_turn: 0.0,
+            desired_speed: 0.0,
             turn_remaining: 0.0,
             shake_remaining: 0.0,
             drag_angle: None,
@@ -148,13 +154,40 @@ fn main() {
         .add_systems(Startup, |mut commands: Commands| {
             commands.spawn(Camera2dBundle::default());
         })
-        .add_systems(Update, (view::run_ui, smoke_test).chain())
+        .add_systems(Update, (view::run_ui, simulate, smoke_test).chain())
         .run();
+}
+
+fn simulate(time: Res<Time<Real>>, mut art: ResMut<Art>) {
+    let state = &mut *art;
+    let elapsed = time.delta_seconds();
+    state.frame_ms += (elapsed * 1000.0 - state.frame_ms) * 0.08;
+    let steps = state.clock.advance(elapsed, state.paused);
+    let start = Instant::now();
+    for _ in 0..steps {
+        (state.angular_speed, state.turn_remaining) = rotation_step(
+            state.angular_speed,
+            state.desired_speed,
+            state.turn_remaining,
+            FIXED_DT,
+        );
+        let shake = if state.shake_remaining > 0.0 {
+            state.shake_remaining = (state.shake_remaining - FIXED_DT).max(0.0);
+            let t = state.simulation.time;
+            glam::Vec2::new(7.0 * (t * 37.0).sin(), 4.5 * (t * 29.0).cos())
+        } else {
+            glam::Vec2::ZERO
+        };
+        state
+            .simulation
+            .step(FIXED_DT, bounded_motion(state.angular_speed, shake));
+    }
+    state.physics_ms = measured_ms(start);
 }
 
 fn smoke_test(
     mut art: ResMut<Art>,
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     window: Query<Entity, With<PrimaryWindow>>,
     mut screenshots: ResMut<ScreenshotManager>,
     mut exit: EventWriter<AppExit>,
@@ -215,6 +248,7 @@ mod tests {
             paused: false,
             angular_speed: 0.0,
             button_turn: 0.0,
+            desired_speed: 0.0,
             turn_remaining: 0.0,
             shake_remaining: 0.0,
             drag_angle: None,
@@ -253,5 +287,25 @@ mod tests {
         next.seed += 1;
         art.apply(next);
         assert_ne!(art.simulation.particles, original);
+    }
+    #[test]
+    fn real_one_second_frame_reports_all_lost_simulation_time() {
+        use bevy::time::TimeUpdateStrategy;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs(1),
+            ))
+            .insert_resource(fixture())
+            .add_systems(Update, simulate);
+        app.update();
+        app.update();
+        let art = app.world().resource::<Art>();
+        assert!(
+            art.clock.dropped_time > 0.96,
+            "lost time was only {}",
+            art.clock.dropped_time
+        );
+        assert!(art.simulation.time < 0.034);
     }
 }
