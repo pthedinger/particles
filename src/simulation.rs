@@ -35,6 +35,7 @@ pub struct Simulation {
     pub time: f32,
     previous: Vec<Vec2>,
     inverse_mass: Vec<f32>,
+    pressure_inverse_mass: Vec<f32>,
     volume: Vec<f32>,
     density: Vec<f32>,
     gradient: Vec<Vec2>,
@@ -99,6 +100,7 @@ impl Simulation {
             time: 0.0,
             previous: Vec::new(),
             inverse_mass: Vec::new(),
+            pressure_inverse_mass: Vec::new(),
             volume: Vec::new(),
             density: Vec::new(),
             gradient: Vec::new(),
@@ -126,6 +128,7 @@ impl Simulation {
         let n = self.particles.len();
         self.previous.resize(n, Vec2::ZERO);
         self.inverse_mass.resize(n, 1.0);
+        self.pressure_inverse_mass.resize(n, 0.0);
         self.volume.resize(n, 1.0);
         self.density.resize(n, 0.0);
         self.gradient.resize(n, Vec2::ZERO);
@@ -147,6 +150,13 @@ impl Simulation {
         for (i, p) in self.particles.iter().enumerate() {
             self.volume[i] = (p.radius / self.base_radius).powi(2);
             self.inverse_mass[i] = 1.0 / (self.materials[p.material].density * self.volume[i]);
+            // Grains are immersed boundaries for the fluid pressure projection,
+            // not movable nodes of its coarse incompressibility lattice.
+            self.pressure_inverse_mass[i] = if self.materials[p.material].phase == Phase::Solid {
+                0.0
+            } else {
+                self.inverse_mass[i]
+            };
         }
     }
 
@@ -221,12 +231,17 @@ impl Simulation {
             let env = self.environment[i];
             if env.y > 0.0001 {
                 let rho = self.materials[self.particles[i].material].density;
-                // Density constraints already support the mixture hydrostatically.
-                // Add a *contrast* force, zero at equal density, rather than a
-                // second Archimedes lift that would make dense sand float.
-                let contrast =
-                    (1.0 - env.x / env.y / rho).clamp(-2.0, 1.0) * (env.y / 0.8).min(1.0);
-                self.buoyancy[i] = GRAVITY * contrast;
+                let submerged = (env.y / 0.8).min(1.0);
+                let density_ratio = (env.x / env.y / rho).min(3.0);
+                self.buoyancy[i] =
+                    if self.materials[self.particles[i].material].phase == Phase::Solid {
+                        // The grain no longer receives a second hydrostatic lift
+                        // from fluid positional projection: apply Archimedes here.
+                        -GRAVITY * density_ratio * submerged
+                    } else {
+                        // Fluid phases remain part of the shared pressure solve.
+                        GRAVITY * (1.0 - density_ratio).clamp(-2.0, 1.0) * submerged
+                    };
                 self.acceleration[i] += self.buoyancy[i];
             }
         }
@@ -299,8 +314,8 @@ impl Simulation {
             let gj = -grad * self.volume[i];
             self.gradient[i] += gi;
             self.gradient[j] += gj;
-            self.denominator[i] += self.inverse_mass[j] * gi.length_squared();
-            self.denominator[j] += self.inverse_mass[i] * gj.length_squared();
+            self.denominator[i] += self.pressure_inverse_mass[j] * gi.length_squared();
+            self.denominator[j] += self.pressure_inverse_mass[i] * gj.length_squared();
         }
         for i in 0..self.particles.len() {
             let phase = self.materials[self.particles[i].material].phase;
@@ -314,7 +329,7 @@ impl Simulation {
             };
             self.lambda[i] = -stiffness * c
                 / (self.denominator[i]
-                    + self.inverse_mass[i] * self.gradient[i].length_squared()
+                    + self.pressure_inverse_mass[i] * self.gradient[i].length_squared()
                     + 80.0);
         }
         for &(i, j) in &self.pairs {
@@ -322,8 +337,8 @@ impl Simulation {
             let q = (1.0 - r / self.support).max(0.0);
             let grad = direction * (-2.0 * q / self.support / rest);
             let f = grad * (self.lambda[i] * self.volume[j] + self.lambda[j] * self.volume[i]);
-            self.delta[i] += f * self.inverse_mass[i];
-            self.delta[j] -= f * self.inverse_mass[j];
+            self.delta[i] += f * self.pressure_inverse_mass[i];
+            self.delta[j] -= f * self.pressure_inverse_mass[j];
             let a = &self.materials[self.particles[i].material];
             let b = &self.materials[self.particles[j].material];
             if self.particles[i].material == self.particles[j].material
@@ -356,20 +371,24 @@ impl Simulation {
             let (i, j) = self.pairs[k];
             let a = self.materials[self.particles[i].material].phase;
             let b = self.materials[self.particles[j].material].phase;
-            let factor = if a == Phase::Solid && b == Phase::Solid {
-                1.0
-            } else if a == Phase::Solid || b == Phase::Solid {
-                0.8
+            let both_grains = a == Phase::Solid && b == Phase::Solid;
+            let (contact_distance, wi) = if both_grains {
+                (
+                    self.particles[i].radius + self.particles[j].radius,
+                    self.inverse_mass[i] / (self.inverse_mass[i] + self.inverse_mass[j]),
+                )
+            } else if a == Phase::Solid {
+                // A fluid parcel is a quadrature point, not a rigid bead with
+                // its own collision radius. Move it out of the grain only.
+                (self.particles[i].radius, 0.0)
+            } else if b == Phase::Solid {
+                (self.particles[j].radius, 1.0)
             } else {
-                0.0
-            };
-            if factor == 0.0 {
                 continue;
-            }
+            };
             let (dir, r) = self.direction(i, j);
-            let overlap = (self.particles[i].radius + self.particles[j].radius) * factor - r;
+            let overlap = contact_distance - r;
             if overlap > 0.0 {
-                let wi = self.inverse_mass[i] / (self.inverse_mass[i] + self.inverse_mass[j]);
                 let ci = dir * (overlap * wi * 0.95).min(self.particles[i].radius * 0.4);
                 let cj = dir * (overlap * (1.0 - wi) * 0.95).min(self.particles[j].radius * 0.4);
                 self.particles[i].position += ci;

@@ -1,0 +1,6 @@
+    Finished `release` profile [optimized] target(s) in 0.76s
+     Running `target/release/benchmark 3000 600`
+Particle solver | aarch64 | fixed dt 1/120 | 600 measured frame equivalents per workload
+settling  | particles 3000 | median 6.389 ms | p95 6.922 ms | max 7.186 ms
+rotation  | particles 3000 | median 5.651 ms | p95 5.878 ms | max 6.257 ms
+shaking   | particles 3000 | median 5.864 ms | p95 6.462 ms | max 6.750 ms

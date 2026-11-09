@@ -1,6 +1,6 @@
 # Measured performance
 
-The initial measurements below precede the grain-sticking correction. The follow-up validation at the end records the corrected version.
+The initial measurements below are retained as history. The latest immersed-grain coupling validation is recorded at the end; earlier higher-count timings have not been rerun for that model.
 
 Measured 2026-11-09 on this development machine: macOS / Apple Silicon (aarch64), Rust 1.90.0, Bevy 0.14.2. Results describe this host under its current load. The application uses a release build, a 1/120-second fixed step and two constraint iterations. The default window is 1360 × 900 logical pixels; the captured Retina render is 2720 × 1800.
 
@@ -62,3 +62,22 @@ The corrected solver removes three sources of artificial sticking: friction acro
 The full release suite now passes **27 tests**, including five additional grain cases: unloaded gap, barely loaded contact, noncontact dry viscosity, loaded-contact friction, and isolated fluid-mediated attraction. The four defect cases were observed failing before their fixes; the loaded-contact guard verifies that sand still has friction under load. Formatting and all-target compilation also pass. A focused independent review approved the contact-load accounting and identified no new actionable issue; it also confirmed the tensile fluid-pressure path.
 
 A fresh 900-frame scripted application run at **3,000 particles** measured **8.334 ms median / 120.0 FPS**, **8.467 ms p95**, and **3.163 ms median physics per displayed frame** after warm-up. All particles remained finite and contained; 0.050 seconds of cumulative startup/lag time were reported. See the [raw follow-up report](benchmarks/2026-11-09-grain-contact-fix.txt). The larger-count results above were not rerun for this correction.
+
+
+## Latest: immersed-grain fluid coupling
+
+The remaining suspended-scaffold artifact required changing the fluid/grain coupling, rather than another friction adjustment. The current solver treats grains as immersed pressure boundaries, uses fluid point samples at grain surfaces, and supplies solid Archimedes buoyancy and two-way viscous drag. See the [implementation notes](implementation-notes.md) for the approximation and its pressure-momentum limitation.
+
+The full deterministic balanced-mixture regression now has **9/446 grains** in the upper/open region after settling, versus **128/446** with the prior coupling. All **29 tests** pass, including neutral buoyancy, no fluid-sample wedging, full-mixture settling and the earlier contact regressions. All-target compilation and formatting also pass.
+
+The latest 1,500-frame scripted windowed test at **3,000 particles** measured **14.385 ms median / 69.5 FPS**, **20.567 ms p95**, and **5.880 ms median physics per displayed frame**, with 1,350 nonpaused samples after warm-up. All particles remained finite and contained. It reported 20.758 simulated seconds and 0.067 seconds cumulative lost time. This meets the median 60 FPS target, with some slower displayed frames; it does not reproduce the earlier version's 120 FPS result in this run.
+
+The sequential headless 600-frame-per-workload measurement of the same model still meets the proposed physics budget:
+
+| Workload | Median ms per 60 Hz equivalent | p95 ms | Max ms |
+| :--- | ---: | ---: | ---: |
+| Settling | 6.389 | 6.922 | 7.186 |
+| Rotation | 5.651 | 5.878 | 6.257 |
+| Shaking | 5.864 | 6.462 | 6.750 |
+
+Raw [windowed](benchmarks/2026-11-09-immersed-grains-windowed.txt), [solver](benchmarks/2026-11-09-immersed-grains-solver.txt), and [full-mixture settling](benchmarks/2026-11-09-full-mixture-settling.txt) reports are included. The visible screenshot now shows this coupling. Higher-count application settings remain exploratory and have not been reprofiled after this change.

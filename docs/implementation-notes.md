@@ -37,3 +37,16 @@ The user's observation that solids stuck together led to isolated behavior tests
 The solver now records actual grain-contact positional corrections and uses their normal load to cap friction, preserving pair momentum and preventing reversal of tangential slip. Viscosity skips solid-solid pairs. Density constraints resist compression only; explicit fluid/gas cohesion stays separate from pressure. No defaults were weakened to hide the defects. Independent review approved the contact accounting and confirmed the residual tensile pressure mechanism before its one-line correction.
 
 All 27 tests pass, including the existing settling and dense-mixture checks. The updated windowed test still measures about 120 FPS at the default 3,000 particles.
+
+
+## Pressure-driven aggregation follow-up
+
+The user still observed open grain networks in liquid after the isolated friction/attraction fixes. Twelve controlled temporary solver variants showed that disabling friction, viscosity or explicit phase cohesion did not remove this behavior. Removing direct grain displacement by the fluid pressure lattice did. The coarse fluid samples were also acting as finite rigid beads: one sample between two noncontacting grains changed their separation from 0.1795 to 0.2612 in one step.
+
+The new coupling treats grains as immersed boundaries with zero inverse mass in the **fluid pressure projection only**. Physical grain inverse masses remain active for grain contacts, drag and force reactions. Grain volumes still contribute to density and displace fluid samples; fluid exclusion uses the actual grain radius and moves the fluid point only. The pressure denominator consistently uses these projection weights. Explicit Archimedes buoyancy now supplies solid hydrostatic response, replacing the old supplemental density-contrast term; equal-density submerged grains receive zero net gravity. Fluid-phase coupling remains unchanged.
+
+The original neutral-density force-pass test assumed the former positional pressure lift and was replaced by the physical zero-net-gravity regression. New full-recipe settling and narrow-gap no-wedging cases were observed failing before the change. In the actual deterministic 1,200-particle balanced-mixture check, the upper/open region held **128/446 grains before** and **9/446 afterward** after a stir and ten simulated seconds. The regression allows a modest transient remainder, rather than requiring every grain to settle identically.
+
+An independent focused review approved the approximate coupling and independently passed 12 quick physics checks. Its minor documentation issue was corrected; the gap test was renamed to match its measured no-wedging assertion. The complete release suite passes **29 tests**, including the four longer scenes, and all-target compilation passes. The final screenshot shows the actual application with a settled bed instead of the suspended scaffold.
+
+The approximation deliberately does not exchange exact positional pressure impulses between fluid and grains; buoyancy and viscous drag retain equal/opposite reactions. This tradeoff addresses under-resolved fluid/grain coupling at interactive particle counts and is documented in the README. It should not be represented as fully conservative rigid/fluid pressure dynamics.

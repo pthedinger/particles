@@ -152,13 +152,6 @@ fn granular_bed_settles_and_remains_still() {
 }
 
 #[test]
-fn neutrally_dense_grain_gets_no_extra_buoyancy_force() {
-    let mut sim = buoyancy_fixture(Phase::Liquid, 1.0);
-    let acceleration = sim.accelerations(Motion::default());
-    assert!((acceleration[0] - Vec2::new(0.0, -1.8)).length() < 0.001);
-}
-
-#[test]
 fn sand_heavier_than_water_sinks_in_a_dense_vessel() {
     let mut recipe = Recipe::balanced();
     recipe.budget = 400;
@@ -302,5 +295,85 @@ fn sparse_fluid_pressure_does_not_pull_noncontacting_grains_together() {
     assert!(
         after >= separation - 1e-6,
         "fluid tension attracted grains: {separation} -> {after}"
+    );
+}
+
+#[test]
+fn balanced_mixture_does_not_form_a_suspended_grain_scaffold() {
+    let mut recipe = Recipe::balanced();
+    recipe.budget = 1200;
+    let mut sim = Simulation::new(&recipe).unwrap();
+    for step in 0..1200 {
+        let t = step as f32 / 120.0;
+        let motion = if step < 180 {
+            Motion {
+                angular_velocity: 1.6,
+                shake: Vec2::new(7.0 * (t * 37.0).sin(), 4.5 * (t * 29.0).cos()),
+            }
+        } else {
+            Motion::default()
+        };
+        sim.step(1.0 / 120.0, motion);
+    }
+    let grains: Vec<_> = sim
+        .particles
+        .iter()
+        .filter(|p| sim.materials[p.material].phase == Phase::Solid)
+        .collect();
+    let suspended = grains
+        .iter()
+        .filter(|p| p.position.y > -0.3 && p.position.length() < 0.9)
+        .count();
+    assert!(
+        suspended as f32 / (grains.len() as f32) < 0.15,
+        "dense fluid held {suspended}/{} heavy grains in an open suspended scaffold",
+        grains.len()
+    );
+}
+
+#[test]
+fn fully_submerged_equal_density_grain_has_no_net_gravity() {
+    let mut sim = buoyancy_fixture(Phase::Liquid, 1.0);
+    let acceleration = sim.accelerations(Motion::default());
+    assert!(
+        acceleration[0].length() < 0.001,
+        "neutrally buoyant grain has residual acceleration {:?}",
+        acceleration[0]
+    );
+}
+
+#[test]
+fn fluid_sample_in_gap_does_not_wedge_grains_apart() {
+    let mut recipe = Recipe::balanced();
+    recipe.budget = 100;
+    let mut sim = Simulation::new(&recipe).unwrap();
+    for material in &mut sim.materials {
+        material.viscosity = 0.0;
+        material.friction = 0.0;
+        material.density = 1.0;
+    }
+    let radius = sim.base_radius;
+    let grain = |x| Particle {
+        position: Vec2::new(x, 0.0),
+        velocity: Vec2::ZERO,
+        material: 3,
+        radius,
+    };
+    sim.particles = vec![
+        grain(-1.05 * radius),
+        grain(1.05 * radius),
+        Particle {
+            position: Vec2::ZERO,
+            velocity: Vec2::ZERO,
+            material: 0,
+            radius,
+        },
+    ];
+    let gap_before = sim.particles[1].position.x - sim.particles[0].position.x;
+    sim.step(1.0 / 120.0, Motion::default());
+    let gap_after = sim.particles[1].position.x - sim.particles[0].position.x;
+    assert!(
+        (gap_after - gap_before).abs() < 1e-5,
+        "a fluid quadrature sample wedged the grains apart: {gap_before} -> {gap_after}"
     );
 }

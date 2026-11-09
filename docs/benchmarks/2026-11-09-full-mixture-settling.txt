@@ -1,0 +1,1 @@
+Actual balanced-mixture regression: 9/446 grains in upper/open region after10seconds (2.02%). Baseline:128/446 (28.70%).
