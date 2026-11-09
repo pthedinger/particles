@@ -2,11 +2,11 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_pixel_buffer::prelude::*;
 use core::f32;
-use std::cmp::min;
 use image;
 use image::Pixel;
 use rand::prelude::*;
 use rand::seq::SliceRandom;
+use std::cmp::min;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use strum::IntoEnumIterator;
@@ -142,9 +142,9 @@ impl Simulation {
         order.shuffle(&mut rng);
 
         Self {
-            max_width: width*pixel_size,
+            max_width: width * pixel_size,
             width,
-            max_height: height*pixel_size,
+            max_height: height * pixel_size,
             height,
             pixel_size,
             grid,
