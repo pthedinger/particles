@@ -2,6 +2,7 @@
 name = "particles"
 version = "0.1.0"
 edition = "2021"
+default-run = "particles"
 
 [profile.dev]
 opt-level = 1
@@ -17,3 +18,5 @@ rand = "0.8.5"
 image = "0.25.4"
 strum = "0.26.3"
 strum_macros = "0.26.3"
+
+glam = "0.27"

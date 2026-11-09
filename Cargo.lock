@@ -3414,6 +3414,7 @@ dependencies = [
  "bevy",
  "bevy-inspector-egui",
  "bevy_pixel_buffer",
+ "glam",
  "image",
  "rand",
  "strum",
