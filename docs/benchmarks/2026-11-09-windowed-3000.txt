@@ -1,0 +1,4 @@
+Windowed smoke: 1800 frames; 3000 particles; 1650 samples
+Frame median 8.319 ms (120.2 FPS), p95 10.216 ms
+Physics median 2.858 ms; simulation 14.858 s; dropped 0.058 s
+Finite/contained: true

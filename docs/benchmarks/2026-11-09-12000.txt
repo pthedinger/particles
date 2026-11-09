@@ -1,0 +1,4 @@
+Particle solver | aarch64 | fixed dt 1/120 | 120 measured frame equivalents per workload
+settling  | particles 12000 | median 32.051 ms | p95 33.404 ms | max 34.909 ms
+rotation  | particles 12000 | median 27.718 ms | p95 29.075 ms | max 32.604 ms
+shaking   | particles 12000 | median 30.786 ms | p95 32.503 ms | max 33.703 ms
