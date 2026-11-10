@@ -20,3 +20,5 @@ strum = "0.26.3"
 strum_macros = "0.26.3"
 
 glam = "0.27"
+wgpu = "0.20.1"
+bytemuck = { version = "1", features = ["derive"] }

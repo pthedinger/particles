@@ -55,6 +55,15 @@ pub struct Simulation {
 
 impl Simulation {
     pub fn new(recipe: &Recipe) -> Result<Self, String> {
+        let mut sim = Self::seeded(recipe)?;
+        for _ in 0..24 {
+            sim.constraints(false);
+        }
+        Ok(sim)
+    }
+
+    /// Reproducible seed without running the CPU constraint solver.
+    pub fn seeded(recipe: &Recipe) -> Result<Self, String> {
         let counts = recipe.counts()?;
         let area: f32 = counts
             .iter()
@@ -118,9 +127,6 @@ impl Simulation {
             side: 0,
         };
         sim.prepare();
-        for _ in 0..24 {
-            sim.constraints(false);
-        }
         Ok(sim)
     }
 

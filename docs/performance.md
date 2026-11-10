@@ -1,6 +1,6 @@
 # Measured performance
 
-The initial measurements below are retained as history. The latest immersed-grain coupling validation is recorded at the end; earlier higher-count timings have not been rerun for that model.
+The CPU measurements below are retained as history. The latest GPU 100,000-particle measurements are recorded at the end; earlier CPU and two-iteration GPU figures do not describe the final GPU solver.
 
 Measured 2026-11-09 on this development machine: macOS / Apple Silicon (aarch64), Rust 1.90.0, Bevy 0.14.2. Results describe this host under its current load. The application uses a release build, a 1/120-second fixed step and two constraint iterations. The default window is 1360 × 900 logical pixels; the captured Retina render is 2720 × 1800.
 
@@ -81,3 +81,42 @@ The sequential headless 600-frame-per-workload measurement of the same model sti
 | Shaking | 5.864 | 6.462 | 6.750 |
 
 Raw [windowed](benchmarks/2026-11-09-immersed-grains-windowed.txt), [solver](benchmarks/2026-11-09-immersed-grains-solver.txt), and [full-mixture settling](benchmarks/2026-11-09-full-mixture-settling.txt) reports are included. The visible screenshot now shows this coupling. Higher-count application settings remain exploratory and have not been reprofiled after this change.
+
+
+## Latest: GPU physics and rendering at 100,000 particles
+
+Measured 2026-11-10 on the local Apple M4 Pro (20 GPU cores, 24 GB unified memory), Metal through Bevy 0.14.2/wgpu 0.20.1. Default balanced recipe, 100,000 total particles, 1/120-second physics steps, six pressure/contact iterations, 1024-square GPU vessel texture. The existing 1360×900 logical window renders at 2720×1800 on the Retina display.
+
+The final 900-frame scripted windowed test includes turning, shaking, pause/resume and settling. Its750 nonpaused frame samples after warmup measured:
+
+| Metric | Final GPU result |
+| :--- | ---: |
+| Displayed frame median |16.978 ms /58.9 FPS |
+| Displayed frame p95 |18.472 ms |
+| CPU submission median (not GPU execution time) |1.502 ms |
+| Simulated time in measured window |11.675 s |
+| Active wall time in measured window |11.686 s |
+| Simulation/wall ratio |0.999 |
+| Dropped time in measured window |0.000 s |
+| Actual GPU state finite and contained |true |
+| Particle/material identity preserved |true |
+
+Window screenshots, PNG encoding, GPU state/pixel readback and validation happen after the timing window. The report freezes its wall/simulation-time anchors before capture and waits for asynchronous window capture to finish. Earlier intermediate reports included screenshot work before the end of the window; their dropped-time totals are not comparable to this final measurement.
+
+The real GPU snapshot has 37,159 grains, mean y-0.653, and 0 grains in the upper/open region. The gas-clustering regression now has peak 7 gas samples per cell versus 192 before separating gas from liquid positional pressure. The separate12k dense-bed volume check improves mean y from-0.314 to about-0.246, while its mean speed falls below0.021. Cached support is cleared on separation; its gap regression was observed failing when clearing was disabled.
+
+All 42 checks pass: 29 ordinary CPU/app tests plus 13 explicitly invoked real Metal tests. All-target checking, formatting and diff whitespace checks pass. GPU tests cover100k driven containment/identity, exact-count crowded bins, maximum material sizes, loaded/gap contacts, fluid wedging, fast swept contacts, full-mixture settling, liquid volume, gas pockets under prolonged interaction, dense-bed volume, support clearing, and drawing/live colour.
+
+This is about 33 times the earlier default particle count, with real-time physical clock progression in the tested sequence. The median displayed rate is just below the 60 FPS target. Results are host- and workload-specific; this is not a claim about one million particles, sustained extreme shaking, every material combination or other GPUs. No particles are deleted and no simulation-speed multiplier is used to obtain the result. The four-step catch-up cap remains visible through the lost-time meter.
+
+The model remains an approximate 2D visual simulation. Liquid/gas pressure coupling uses immersed gas volume and buoyancy/drag rather than exact pressure impulses or a thermodynamic gas law. The conservative high-speed grain guard prioritizes preventing crossings over exact impact momentum. Cached normal support is bounded and contact-gated. Ordinary grain contacts remain mass-weighted and friction stays load-limited.
+
+Independent review found no Critical issue and identified the high-speed crossing case; that finding is covered by a failing-then-passing real-GPU regression. One Minor diagnostic limitation is deferred: resetting/remixing/applying a new recipe after smoke warmup mixes measurement epochs. Use a fresh process for each measured recipe. Normal interactive reset recreates the GPU state correctly. Native pointer-event automation and live resizing were not exercised; scripted controls use the same bounded motion path and coordinate mapping remains unit-tested.
+
+Raw [windowed report](benchmarks/2026-11-10-gpu-100k-windowed.txt). Reproduce with the GPU smoke command in the README. The completion-inclusive `gpu_benchmark` tool is also available for headless profiling; older pre-final-model timings are not substituted for current results here.
+
+![100,000-particle GPU vessel](screenshots/sand-art-gpu-100k.png)
+
+The shorter 360-frame capture during active shaking measured 120.1 FPS median / 10.507 ms p95, with a 1.000 simulation/wall ratio and no dropped time. See its [raw report](benchmarks/2026-11-10-gpu-100k-shaking.txt). Particle spreading and dense settling have different neighbour costs.
+
+![GPU scene during shaking](screenshots/sand-art-gpu-shaking.png)

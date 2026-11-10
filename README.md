@@ -8,11 +8,14 @@ A shallow circular vessel of liquid, gas pockets and colored grains, simulated w
 cargo run --release --bin particles
 ```
 
-Use a release build for real-time simulation. The default is 3,000 particles; choose 1,500, 3,000, 6,000, 12,000 or 24,000 in the controls and press **Apply mixture**. Higher settings may run slower than real time. The application never deletes particles or changes your mixture to maintain frame rate.
+Use a release build. The default is **100,000 particles simulated and drawn on the GPU**. Choose 12,000, 24,000, 50,000 or 100,000 in the controls and press **Apply mixture**. Particle state stays on the GPU; the CPU sends controls and material properties. No particle count is reduced automatically.
 
 ```sh
-cargo run --release --bin particles -- --particles 6000
+cargo run --release --bin particles -- --particles 50000
+cargo run --release --bin particles -- --cpu
 ```
+
+`--cpu` runs the retained CPU reference at 3,000 particles by default. GPU mode needs compute and vertex storage-buffer support (tested with Metal on an Apple M4 Pro). Bevy/wgpu handles the graphics API.
 
 ## Controls
 
@@ -32,13 +35,17 @@ The headless core uses a fixed 1/120-second step, reusable uniform spatial bins 
 
 Grains are **immersed boundaries** for the liquid/gas pressure solve: their volumes contribute to fluid density, while pressure projection moves fluid samples around the grains. Fluid samples are quadrature points, so their sampling radius does not wedge grains apart across narrow gaps. Grain motion comes from gravity, grain contacts, glass drag, and two-way fluid drag and Archimedes buoyancy. Equal-density submerged grains have zero net gravity. This avoids mechanically bracing grains in the coarse fluid sampling lattice, which previously left open grain networks suspended in the liquid.
 
+Gas has a separate compressible pressure solve: liquid sees gas parcel volume as an immersed boundary, without forcing low-mass gas samples through the liquid incompressibility projection. This prevents artificial gas collapse and dense neighbour-search hotspots. Gas remains coupled through buoyancy and drag, rather than a calibrated pressure/volume law.
+
 This low-speed coupling approximates hydrodynamic pressure with buoyancy and drag. Their neighbor reactions exchange equal/opposite momentum before existing clamps, but the fluid positional projection does **not** transfer an exact pressure impulse back to grains. It is intended for interactive settling rather than quantitative fluid/rigid-body dynamics.
 
 Rotation drives bounded wall/glass drag; a smooth circular boundary alone would barely stir its contents. Shaking applies bounded translational inertial acceleration in the vessel's frame. This is a visually plausible 2D physical toy: it approximates phase interfaces, gas pressure, buoyancy and shallow glass coupling. It is not a calibrated CFD or thermodynamic model; no combustion, heat, dissolved gas or phase changes are modeled. Same-phase cohesion and unlike-liquid repulsion are local approximations, not a quantitative surface-tension model.
 
-A fixed-resolution soft field reconstructs liquid regions and gas openings; colored grains are drawn as one batched mesh. There is no Bevy entity per particle. The solver is independent of Bevy/UI, so later neighbor-search parallelism, a GPU solver and larger counts can be developed behind the same state boundary. The current CPU implementation remains the first scaling limit.
+The GPU solver uses WGSL compute shaders, read-only input snapshots and a separate output buffer. Counting, two-level prefix scans and scatter spatially reorder particles before neighbour gathers. There is no fixed cell capacity or all-pairs search. Stable IDs preserve material identity and solver history through reordering. Six pressure/contact iterations maintain bulk volume at high resolution; bounded contact support is reused while grains touch and cleared on separation. Friction runs once after position correction, with bounded symmetric neighbour damping. A conservative swept-motion guard catches fast crossings between timesteps, while a world-space speed bound avoids slowing flow simply because grains are smaller. This rare high-speed guard treats predicted neighbours as obstacles and does not conserve exact impact momentum; ordinary contact projection remains mass-weighted. GPU trajectories are not bitwise deterministic because bin insertion and summation order can vary.
 
-The frame meter shows actual frame, physics and surface-drawing time. At most four fixed steps run per displayed frame. If catch-up would exceed this, the clock reports lost simulation time rather than hiding lag. Brief startup/shader compilation stalls can contribute to this cumulative value. Resizing preserves the circular vessel and pointer coordinates; the desktop window has a minimum size to keep controls usable.
+Liquid/gas splats accumulate into a 1024-square GPU texture; grains use instanced quads with circular shading. egui samples the vessel texture directly. No CPU mesh or per-particle Bevy entities are created, and ordinary frames do not read particle state back to the CPU. The CPU reference renderer retains its soft field and batched grain mesh.
+
+The frame meter shows displayed frame time and CPU command-submission time in GPU mode. Submission time is **not GPU execution time**. At most four 1/120-second steps run per displayed frame; the clock reports lost time if it cannot keep up. Startup/shader compilation stalls can contribute to this cumulative value. Resizing preserves the circular vessel and pointer coordinates; the desktop window has a minimum size to keep controls usable.
 
 ## Verification and performance
 
@@ -47,9 +54,11 @@ cargo test --release
 cargo check --all-targets
 cargo fmt --all -- --check
 cargo run --release --bin benchmark -- 3000 600
+cargo test --release --test gpu -- --ignored --test-threads=1
+cargo run --release --bin gpu_benchmark -- 100000 300
 ```
 
-The benchmark warms up 120 frame-equivalents, then independently measures settling, rotation and shaking. Each measured frame-equivalent advances two fixed steps (1/60 second). It reports median, 95th percentile and maximum solver time and checks finite state, containment and particle count. It does not measure rendering. Run different sizes separately to avoid contention:
+The CPU benchmark warms up 120 frame-equivalents, then independently measures settling, rotation and shaking. Each measured frame-equivalent advances two fixed steps (1/60 second). It reports median, 95th percentile and maximum solver time and checks finite state, containment and particle count. It does not measure rendering. Run different sizes separately to avoid contention:
 
 ```sh
 cargo run --release --bin benchmark -- 1500 600
@@ -57,13 +66,15 @@ cargo run --release --bin benchmark -- 6000 600
 cargo run --release --bin benchmark -- 12000 120
 ```
 
-A windowed scripted test exercises rotation, shaking and pause/resume, captures the app's own rendered output, and records frame timing:
+The GPU benchmark waits for GPU completion for each sample and measures two 1/120-second steps. It excludes drawing. GPU tests are explicit/ignored in the ordinary suite because they require a compute-capable adapter; they fail if it is unavailable.
+
+A windowed scripted test exercises rotation, shaking and pause/resume, captures the app's own rendered output, and records frame timing, active wall versus simulated time, and actual GPU containment/material identity. Particle and vessel-pixel readback happens **after** the measured window. A separate `.vessel.png` image accompanies the screenshot:
 
 ```sh
 cargo run --release --bin particles -- --smoke-frames 1800 --scripted --screenshot /tmp/sand-art.png --report /tmp/sand-art.txt
 ```
 
-Measured results for this development machine are recorded in [docs/performance.md](docs/performance.md). They are machine- and workload-specific, not a guarantee for other systems. The target is 60 displayed FPS at the default resolution; higher particle counts are an explicit future scaling goal.
+Measured results for this development machine are recorded in [docs/performance.md](docs/performance.md). They are machine- and workload-specific, not a guarantee for other systems. The latest scripted run at 100,000 particles measured 58.9 FPS median and a0.999 simulation/wall-time ratio, with no dropped time after warmup. See the performance report for the tested workload and limitations; one million particles remains future work.
 
 ## Original experiment
 

@@ -445,12 +445,12 @@ fn sidebar(ctx: &egui::Context, state: &mut Art) {
                 egui::ComboBox::from_id_salt("resolution")
                     .selected_text(format!("{}", state.pending.budget))
                     .show_ui(ui, |ui| {
-                        for n in [1500, 3000, 6000, 12000, 24000] {
-                            ui.selectable_value(
-                                &mut state.pending.budget,
-                                n,
-                                format!("{n}{}", if n > 3000 { " (slower)" } else { "" }),
-                            );
+                        for n in if state.gpu {
+                            vec![12000, 24000, 50000, 100000]
+                        } else {
+                            vec![1500, 3000, 6000, 12000, 24000]
+                        } {
+                            ui.selectable_value(&mut state.pending.budget, n, format!("{n}"));
                         }
                     });
             });
@@ -485,10 +485,17 @@ fn sidebar(ctx: &egui::Context, state: &mut Art) {
                 .color(CREAM),
             );
             ui.label(
-                RichText::new(format!(
-                    "Frame {:.1} ms   /   physics {:.1} ms   /   draw {:.1} ms",
-                    state.frame_ms, state.physics_ms, state.drawing_ms
-                ))
+                RichText::new(if state.gpu {
+                    format!(
+                        "GPU · frame {:.1} ms / submit {:.1} ms",
+                        state.frame_ms, state.physics_ms
+                    )
+                } else {
+                    format!(
+                        "Frame {:.1} ms / physics {:.1} ms / draw {:.1} ms",
+                        state.frame_ms, state.physics_ms, state.drawing_ms
+                    )
+                })
                 .size(10.0)
                 .color(MUTED),
             );
@@ -530,52 +537,61 @@ fn draw_vessel(ui: &egui::Ui, ctx: &egui::Context, state: &mut Art, center: Pos2
     );
     painter.circle_filled(center, radius + 4.0, Color32::from_rgb(7, 17, 23));
     painter.circle_filled(center, radius, Color32::from_rgb(14, 31, 40));
-    if !state.paused || state.field.texture.is_none() || state.field.dirty {
-        state.field.update(ctx, &state.simulation);
-    }
-    if let Some(texture) = &state.field.texture {
+    if let Some(texture) = state.gpu_texture {
         painter.image(
-            texture.id(),
+            texture,
             Rect::from_center_size(center, egui::Vec2::splat(radius * 2.0)),
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::WHITE,
         );
-    }
-    let mut mesh = egui::Mesh::default();
-    mesh.reserve_vertices(state.simulation.particles.len() * 9);
-    mesh.reserve_triangles(state.simulation.particles.len() * 8);
-    for (i, p) in state.simulation.particles.iter().enumerate() {
-        let material = &state.simulation.materials[p.material];
-        if material.phase != Phase::Solid {
-            continue;
+    } else {
+        if !state.paused || state.field.texture.is_none() || state.field.dirty {
+            state.field.update(ctx, &state.simulation);
         }
-        let pos = center + egui::vec2(p.position.x * radius, -p.position.y * radius);
-        let r = (p.radius * radius * 0.96).max(0.5);
-        let variation = 0.9 + (i % 19) as f32 * 0.011;
-        let color = |shade: f32| {
-            Color32::from_rgb(
-                (material.color[0] as f32 * shade).min(255.0) as u8,
-                (material.color[1] as f32 * shade).min(255.0) as u8,
-                (material.color[2] as f32 * shade).min(255.0) as u8,
-            )
-        };
-        let base = mesh.vertices.len() as u32;
-        mesh.colored_vertex(
-            pos - egui::vec2(r * 0.15, r * 0.15),
-            color(variation * 1.08),
-        );
-        for side in 0..8 {
-            let a = side as f32 * std::f32::consts::TAU / 8.0;
-            mesh.colored_vertex(
-                pos + egui::vec2(a.cos() * r, a.sin() * r),
-                color(variation * (0.75 - 0.1 * a.sin())),
+        if let Some(texture) = &state.field.texture {
+            painter.image(
+                texture.id(),
+                Rect::from_center_size(center, egui::Vec2::splat(radius * 2.0)),
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
             );
         }
-        for side in 0..8 {
-            mesh.add_triangle(base, base + 1 + side, base + 1 + (side + 1) % 8);
+        let mut mesh = egui::Mesh::default();
+        mesh.reserve_vertices(state.simulation.particles.len() * 9);
+        mesh.reserve_triangles(state.simulation.particles.len() * 8);
+        for (i, p) in state.simulation.particles.iter().enumerate() {
+            let material = &state.simulation.materials[p.material];
+            if material.phase != Phase::Solid {
+                continue;
+            }
+            let pos = center + egui::vec2(p.position.x * radius, -p.position.y * radius);
+            let r = (p.radius * radius * 0.96).max(0.5);
+            let variation = 0.9 + (i % 19) as f32 * 0.011;
+            let color = |shade: f32| {
+                Color32::from_rgb(
+                    (material.color[0] as f32 * shade).min(255.0) as u8,
+                    (material.color[1] as f32 * shade).min(255.0) as u8,
+                    (material.color[2] as f32 * shade).min(255.0) as u8,
+                )
+            };
+            let base = mesh.vertices.len() as u32;
+            mesh.colored_vertex(
+                pos - egui::vec2(r * 0.15, r * 0.15),
+                color(variation * 1.08),
+            );
+            for side in 0..8 {
+                let a = side as f32 * std::f32::consts::TAU / 8.0;
+                mesh.colored_vertex(
+                    pos + egui::vec2(a.cos() * r, a.sin() * r),
+                    color(variation * (0.75 - 0.1 * a.sin())),
+                );
+            }
+            for side in 0..8 {
+                mesh.add_triangle(base, base + 1 + side, base + 1 + (side + 1) % 8);
+            }
         }
+        painter.add(egui::Shape::mesh(mesh));
     }
-    painter.add(egui::Shape::mesh(mesh));
     painter.circle_stroke(
         center,
         radius + 1.0,

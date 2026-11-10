@@ -3414,11 +3414,13 @@ dependencies = [
  "bevy",
  "bevy-inspector-egui",
  "bevy_pixel_buffer",
+ "bytemuck",
  "glam",
  "image",
  "rand",
  "strum",
  "strum_macros",
+ "wgpu",
 ]
 
 [[package]]

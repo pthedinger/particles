@@ -1,3 +1,4 @@
+mod gpu_view;
 mod view;
 use bevy::{
     app::AppExit,
@@ -16,6 +17,14 @@ use std::time::Instant;
 #[derive(Resource)]
 pub struct Art {
     pub simulation: Simulation,
+    pub gpu: bool,
+    pub revision: u64,
+    pub gpu_texture: Option<bevy_inspector_egui::egui::TextureId>,
+    pub gpu_steps: Vec<particles::gpu::Step>,
+    pub active_wall: f32,
+    pub measurement_start: Option<(f32, f32, f32)>,
+    pub measurement_end: Option<(f32, f32, f32)>,
+    pub reported: bool,
     pub recipe: Recipe,
     pub pending: Recipe,
     pub clock: Clock,
@@ -43,13 +52,26 @@ pub struct Options {
     pub screenshot: Option<String>,
     pub report: Option<String>,
     pub scripted: bool,
+    screenshot_result: std::sync::Arc<std::sync::Mutex<Option<Result<(), String>>>>,
 }
 
 impl Art {
     pub fn apply(&mut self, recipe: Recipe) {
-        match Simulation::new(&recipe) {
+        let next = if self.gpu {
+            Simulation::seeded(&recipe)
+        } else {
+            Simulation::new(&recipe)
+        };
+        match next {
             Ok(simulation) => {
                 self.simulation = simulation;
+                self.revision += 1;
+                self.gpu_steps.clear();
+                self.active_wall = 0.;
+                self.measurement_start = None;
+                self.measurement_end = None;
+                self.reported = false;
+                self.options.screenshot_result = Default::default();
                 self.recipe = recipe.clone();
                 self.pending = recipe;
                 self.field.invalidate();
@@ -69,10 +91,15 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut recipe = Recipe::balanced();
     let mut options = Options::default();
+    let gpu = !args.iter().any(|s| s == "--cpu");
+    if gpu {
+        recipe.budget = 100_000;
+    }
     let mut i = 1;
     while i < args.len() {
         let next = || args.get(i + 1).cloned().unwrap_or_default();
         match args[i].as_str() {
+            "--cpu" => {}
             "--particles" => {
                 recipe.budget = next().parse().unwrap_or(0);
                 i += 1;
@@ -91,7 +118,7 @@ fn main() {
             }
             "--scripted" => options.scripted = true,
             "--help" => {
-                println!("Sand Art\n  --particles N\n  --smoke-frames N [--scripted] [--screenshot PATH] [--report PATH]\nHeadless benchmark: cargo run --release --bin benchmark -- 3000 600");
+                println!("Sand Art (GPU, 100,000 particles by default)\n  --cpu (CPU reference, 3,000 particles)\n  --particles N\n  --smoke-frames N [--scripted] [--screenshot PATH] [--report PATH]\nHeadless benchmark: cargo run --release --bin benchmark -- 3000 600");
                 return;
             }
             unknown => {
@@ -105,17 +132,30 @@ fn main() {
         eprintln!("Use at least 20 smoke frames.");
         std::process::exit(2);
     }
-    let simulation = match Simulation::new(&recipe) {
+    let initial = if gpu {
+        Simulation::seeded(&recipe)
+    } else {
+        Simulation::new(&recipe)
+    };
+    let simulation = match initial {
         Ok(sim) => sim,
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2);
         }
     };
-    App::new()
-        .insert_resource(ClearColor(Color::srgb(0.035, 0.055, 0.07)))
+    let mut app = App::new();
+    app.insert_resource(ClearColor(Color::srgb(0.035, 0.055, 0.07)))
         .insert_resource(Art {
             simulation,
+            gpu,
+            revision: 1,
+            gpu_texture: None,
+            gpu_steps: Vec::new(),
+            active_wall: 0.,
+            measurement_start: None,
+            measurement_end: None,
+            reported: false,
             pending: recipe.clone(),
             recipe,
             clock: Clock::default(),
@@ -154,14 +194,20 @@ fn main() {
         .add_systems(Startup, |mut commands: Commands| {
             commands.spawn(Camera2dBundle::default());
         })
-        .add_systems(Update, (view::run_ui, simulate, smoke_test).chain())
-        .run();
+        .add_systems(Update, (view::run_ui, simulate, smoke_test).chain());
+    if gpu {
+        app.add_plugins(gpu_view::GpuArtPlugin);
+    }
+    app.run();
 }
 
 fn simulate(time: Res<Time<Real>>, mut art: ResMut<Art>) {
     let state = &mut *art;
     let elapsed = time.delta_seconds();
     state.frame_ms += (elapsed * 1000.0 - state.frame_ms) * 0.08;
+    if !state.paused {
+        state.active_wall += elapsed;
+    }
     let steps = state.clock.advance(elapsed, state.paused);
     let start = Instant::now();
     for _ in 0..steps {
@@ -178,11 +224,23 @@ fn simulate(time: Res<Time<Real>>, mut art: ResMut<Art>) {
         } else {
             glam::Vec2::ZERO
         };
-        state
-            .simulation
-            .step(FIXED_DT, bounded_motion(state.angular_speed, shake));
+        let motion = bounded_motion(state.angular_speed, shake);
+        if state.gpu {
+            state.gpu_steps.push(particles::gpu::Step {
+                dt: FIXED_DT,
+                angular_speed: motion.angular_velocity,
+                shake: motion.shake.to_array(),
+            });
+            state.simulation.time += FIXED_DT;
+            state.simulation.angle = (state.simulation.angle + motion.angular_velocity * FIXED_DT)
+                .rem_euclid(std::f32::consts::TAU);
+        } else {
+            state.simulation.step(FIXED_DT, motion);
+        }
     }
-    state.physics_ms = measured_ms(start);
+    if !state.gpu {
+        state.physics_ms = measured_ms(start);
+    }
 }
 
 fn smoke_test(
@@ -191,9 +249,28 @@ fn smoke_test(
     window: Query<Entity, With<PrimaryWindow>>,
     mut screenshots: ResMut<ScreenshotManager>,
     mut exit: EventWriter<AppExit>,
+    mut gpu: Option<ResMut<gpu_view::GpuFrame>>,
 ) {
     art.frames += 1;
-    if art.frames > 120 && !art.paused {
+    if art.reported {
+        return;
+    }
+    let warmup = art
+        .options
+        .smoke_frames
+        .map(|n| (n / 4).min(120))
+        .unwrap_or(120);
+    if art.frames == warmup {
+        let simulated = gpu
+            .as_ref()
+            .map(|g| g.feedback.lock().unwrap().simulated)
+            .unwrap_or(art.simulation.time);
+        art.measurement_start = Some((art.active_wall, simulated, art.clock.dropped_time));
+    }
+    if art.frames > warmup
+        && !art.paused
+        && art.options.smoke_frames.is_none_or(|n| art.frames <= n)
+    {
         art.samples.push(time.delta_seconds() * 1000.0);
         let physics = art.physics_ms;
         art.physics_samples.push(physics);
@@ -201,14 +278,40 @@ fn smoke_test(
     let Some(limit) = art.options.smoke_frames else {
         return;
     };
-    if art.frames == limit.saturating_sub(5) {
-        if let Some(path) = &art.options.screenshot {
-            if let Err(error) = screenshots.save_screenshot_to_disk(window.single(), path) {
-                error!("Screenshot failed: {error}");
+    if art.frames == limit.saturating_add(1) {
+        if let Some(path) = art.options.screenshot.clone() {
+            let result = art.options.screenshot_result.clone();
+            if let Err(error) = screenshots.take_screenshot(window.single(), move |image| {
+                let saved = image
+                    .try_into_dynamic()
+                    .map_err(|e| e.to_string())
+                    .and_then(|image| image.to_rgb8().save(&path).map_err(|e| e.to_string()));
+                *result.lock().unwrap() = Some(saved);
+            }) {
+                *art.options.screenshot_result.lock().unwrap() = Some(Err(error.to_string()));
             }
         }
     }
     if art.frames == limit {
+        let simulated = gpu
+            .as_ref()
+            .map(|g| g.feedback.lock().unwrap().simulated)
+            .unwrap_or(art.simulation.time);
+        art.measurement_end = Some((art.active_wall, simulated, art.clock.dropped_time));
+    }
+    if art.frames >= limit && art.gpu {
+        let frame = gpu.as_mut().unwrap();
+        frame.check = true;
+        if !frame.feedback.lock().unwrap().checked {
+            return;
+        }
+    }
+    if art.frames >= limit {
+        if art.options.screenshot.is_some()
+            && art.options.screenshot_result.lock().unwrap().is_none()
+        {
+            return;
+        }
         let mut samples = art.samples.clone();
         samples.sort_by(f32::total_cmp);
         let mut physics = art.physics_samples.clone();
@@ -219,13 +322,43 @@ fn smoke_test(
             .copied()
             .unwrap_or(0.0);
         let report = format!("Windowed smoke: {} frames; {} particles; {} samples\nFrame median {:.3} ms ({:.1} FPS), p95 {:.3} ms\nPhysics median {:.3} ms; simulation {:.3} s; dropped {:.3} s\nFinite/contained: {}\n", art.frames, art.simulation.particles.len(), samples.len(), median,1000.0/median.max(0.001),p95,physics.get(physics.len()/2).copied().unwrap_or(0.0),art.simulation.time,art.clock.dropped_time,art.simulation.particles.iter().all(|p| p.position.is_finite() && p.velocity.is_finite() && p.position.length()+p.radius<=1.001));
+        let report = if art.gpu {
+            let f = gpu.as_ref().unwrap().feedback.lock().unwrap();
+            let start = art.measurement_start.unwrap_or_default();
+            let end = art.measurement_end.unwrap_or_default();
+            let elapsed = end.0 - start.0;
+            let simulated = end.1 - start.1;
+            let dropped = end.2 - start.2;
+            format!("GPU windowed: target {} particles; {} measured frames\nFrame median {:.3} ms ({:.1} FPS), p95 {:.3} ms\nCPU submit median {:.3} ms (not GPU execution time)\nSimulation {:.3} s / active wall {:.3} s; ratio {:.3}; dropped {:.3} s\nActual GPU state: finite/contained {}; identities preserved {}; visible pixels {}\nGrains: {}; mean y {:.3}; upper/open {}/{}\n",art.simulation.particles.len(),samples.len(),median,1000./median.max(0.001),p95,physics.get(physics.len()/2).copied().unwrap_or(0.),simulated,elapsed,simulated/elapsed.max(0.001),dropped,f.finite_contained,f.identities_preserved,f.visible_pixels,f.grains,f.grain_mean_y,f.suspended,f.grains)
+        } else {
+            report
+        };
         print!("{report}");
         if let Some(path) = &art.options.report {
             if let Err(error) = std::fs::write(path, &report) {
                 error!("Report write failed: {error}");
             }
         }
-        exit.send(AppExit::Success);
+        art.reported = true;
+        let valid = gpu.as_ref().is_none_or(|g| {
+            let f = g.feedback.lock().unwrap();
+            f.finite_contained && f.identities_preserved && f.visible_pixels > 0
+        });
+        let capture_ok = art
+            .options
+            .screenshot_result
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|r| r.is_ok());
+        if let Some(Err(error)) = art.options.screenshot_result.lock().unwrap().as_ref() {
+            error!("Screenshot failed: {error}");
+        }
+        exit.send(if valid && capture_ok {
+            AppExit::Success
+        } else {
+            AppExit::error()
+        });
     }
 }
 
@@ -242,6 +375,14 @@ mod tests {
         let simulation = Simulation::new(&recipe).unwrap();
         Art {
             simulation,
+            gpu: false,
+            revision: 1,
+            gpu_texture: None,
+            gpu_steps: Vec::new(),
+            active_wall: 0.,
+            measurement_start: None,
+            measurement_end: None,
+            reported: false,
             pending: recipe.clone(),
             recipe,
             clock: Clock::default(),
