@@ -2,7 +2,7 @@ struct Particle {
     position: vec2<f32>, velocity: vec2<f32>, radius:f32, material:u32, id:u32, pad:u32
 }
 struct Material {
-    color:vec4<f32>, density:f32, viscosity:f32, friction:f32, phase:u32
+    color:vec4<f32>, density:f32, viscosity:f32, friction:f32, phase:u32, surface_tension:f32, compression_resistance:f32, mixing_resistance:f32, neighbor_target:f32, thermal_motion:f32, padding:array<f32,3>
 }
 @group(0) @binding(0) var<storage,read> particles:array<Particle>;
 @group(0) @binding(1) var<storage,read> materials:array<Material>;

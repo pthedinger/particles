@@ -27,6 +27,7 @@ pub struct Art {
     pub reported: bool,
     pub recipe: Recipe,
     pub pending: Recipe,
+    pub selected_preset: particles::material::Preset,
     pub clock: Clock,
     pub paused: bool,
     pub angular_speed: f32,
@@ -56,6 +57,10 @@ pub struct Options {
 }
 
 impl Art {
+    pub fn refresh_materials(&mut self) {
+        self.simulation.materials = self.recipe.effective_materials();
+        self.field.invalidate();
+    }
     pub fn apply(&mut self, recipe: Recipe) {
         let next = if self.gpu {
             Simulation::seeded(&recipe)
@@ -68,6 +73,9 @@ impl Art {
                 self.revision += 1;
                 self.gpu_steps.clear();
                 self.active_wall = 0.;
+                self.frames = 0;
+                self.samples.clear();
+                self.physics_samples.clear();
                 self.measurement_start = None;
                 self.measurement_end = None;
                 self.reported = false;
@@ -156,6 +164,7 @@ fn main() {
             measurement_start: None,
             measurement_end: None,
             reported: false,
+            selected_preset: particles::material::Preset::SandArt,
             pending: recipe.clone(),
             recipe,
             clock: Clock::default(),
@@ -369,7 +378,7 @@ pub fn measured_ms(start: Instant) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fixture() -> Art {
+    pub(super) fn fixture() -> Art {
         let mut recipe = Recipe::balanced();
         recipe.budget = 80;
         let simulation = Simulation::new(&recipe).unwrap();
@@ -383,6 +392,7 @@ mod tests {
             measurement_start: None,
             measurement_end: None,
             reported: false,
+            selected_preset: particles::material::Preset::SandArt,
             pending: recipe.clone(),
             recipe,
             clock: Clock::default(),
@@ -403,6 +413,40 @@ mod tests {
             samples: Vec::new(),
             physics_samples: Vec::new(),
         }
+    }
+    #[test]
+    fn live_temperature_changes_properties_without_reseeding_or_compounding() {
+        let mut art = fixture();
+        let particles = art.simulation.particles.clone();
+        let reference = art.recipe.materials.clone();
+        let revision = art.revision;
+        art.recipe.temperature_c = 120.;
+        art.refresh_materials();
+        assert!(art.simulation.materials[0].viscosity < reference[0].viscosity);
+        assert_eq!(art.simulation.particles, particles);
+        assert_eq!(art.revision, revision);
+        art.refresh_materials();
+        assert_eq!(art.simulation.materials, art.recipe.effective_materials());
+        art.recipe.temperature_c = 20.;
+        art.refresh_materials();
+        assert_eq!(art.simulation.materials, reference);
+    }
+    #[test]
+    fn draft_structure_changes_only_on_apply_and_resets_measurement_epoch() {
+        let mut art = fixture();
+        let original = art.simulation.particles.clone();
+        art.pending.set_percentage(3, 100.).unwrap();
+        art.pending.materials[3].radius = 1.8;
+        art.pending.budget = 120;
+        assert_eq!(art.simulation.particles, original);
+        art.frames = 500;
+        art.samples.push(16.);
+        art.apply(art.pending.clone());
+        assert!(art.simulation.particles.iter().all(|p| p.material == 3));
+        assert_eq!(art.simulation.particles.len(), 120);
+        assert_eq!(art.recipe.materials[3].radius, 1.8);
+        assert_eq!(art.frames, 0);
+        assert!(art.samples.is_empty());
     }
     #[test]
     fn invalid_apply_preserves_running_mixture() {

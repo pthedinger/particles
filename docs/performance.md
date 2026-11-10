@@ -120,3 +120,16 @@ Raw [windowed report](benchmarks/2026-11-10-gpu-100k-windowed.txt). Reproduce wi
 The shorter 360-frame capture during active shaking measured 120.1 FPS median / 10.507 ms p95, with a 1.000 simulation/wall ratio and no dropped time. See its [raw report](benchmarks/2026-11-10-gpu-100k-shaking.txt). Particle spreading and dense settling have different neighbour costs.
 
 ![GPU scene during shaking](screenshots/sand-art-gpu-shaking.png)
+
+
+## Material lab: editable composition and temperature
+
+Measured 2026-11-10 with the same GPU, default 100,000-particle recipe at 20°C, revised controls and thermal motion enabled. A fresh 900-frame scripted run (750 nonpaused samples after warmup) measured **16.899 ms / 59.2 FPS median**, **20.625 ms p95** and **1.535 ms CPU submission median**. The measured interval advanced **11.658 simulated seconds / 11.705 active wall seconds** (ratio **0.996**), with **0.033 seconds** dropped. Actual GPU readback remained finite/contained with identities preserved, 37,159 grains and no grains in the upper/open region. These figures describe the default mixture, rather than every possible material/temperature combination.
+
+The expanded GPU suite has 16 passing tests, including actual cohesion/mixing/compression response, temperature-dependent thermal motion, and pure liquid/gas at opposite temperature and sample-size endpoints. The ordinary suite covers exact percentage endpoints, presets, custom definitions, reference-temperature reversibility, invalid properties, live edits without reseeding, structural Apply, and real egui Solo → Apply interaction. Existing grain and volume regressions remain in place. Reset/Remix/Apply now reset the smoke measurement epoch as well as the physical scene.
+
+The sidebar scrolls at small window sizes. The default layout and rendered vessel were inspected; the egui interaction test checks Apply and frame timing are visible in a 900-pixel logical window. Native pointer automation and live resizing were not exercised.
+
+Raw [windowed report](benchmarks/2026-11-10-material-lab-windowed.txt). The uniform temperature is an external phenomenological bath, with fixed particle phases and geometry; it changes effective density, viscosity, fluid cohesion, gas target concentration and velocity diffusion. It has no heat transport or calibrated thermodynamic conservation law. Extreme user-selected properties can change both physical behaviour and neighbour-search cost.
+
+![Material lab controls and vessel](screenshots/sand-art-material-lab.png)

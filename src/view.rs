@@ -6,7 +6,7 @@ use bevy_inspector_egui::{
 };
 use particles::{
     controls::view_to_world,
-    material::{Phase, Recipe},
+    material::{Material, MaterialProperties, Phase, Preset},
 };
 use std::time::Instant;
 
@@ -261,7 +261,7 @@ pub fn run_ui(
 fn sidebar(ctx: &egui::Context, state: &mut Art) {
     state.button_turn = 0.0;
     egui::SidePanel::left("controls")
-        .exact_width(318.0)
+        .exact_width(350.0)
         .resizable(false)
         .frame(
             egui::Frame::none()
@@ -269,247 +269,398 @@ fn sidebar(ctx: &egui::Context, state: &mut Art) {
                 .inner_margin(egui::Margin::same(24.0)),
         )
         .show(ctx, |ui| {
-            ui.label(
-                RichText::new("S A N D   /   0 1")
-                    .size(11.0)
-                    .color(GOLD)
-                    .strong(),
-            );
-            ui.add_space(12.0);
-            ui.label(RichText::new("Matter in\nmotion.").size(37.0).color(CREAM));
-            ui.label(
-                RichText::new("A small world. An endless rearrangement.")
-                    .size(12.0)
-                    .color(MUTED),
-            );
-            ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .add_sized(
-                        [121.0, 36.0],
-                        egui::Button::new(if state.paused { "Resume" } else { "Pause" }),
-                    )
-                    .clicked()
-                {
-                    state.paused = !state.paused;
-                }
-                if ui
-                    .add_sized([121.0, 36.0], egui::Button::new("Reset"))
-                    .clicked()
-                {
-                    state.apply(state.recipe.clone());
-                }
-            });
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!state.paused, egui::Button::new("Left"))
-                    .is_pointer_button_down_on()
-                {
-                    state.button_turn = 1.6;
-                }
-                if ui
-                    .add_enabled(!state.paused, egui::Button::new("Right"))
-                    .is_pointer_button_down_on()
-                {
-                    state.button_turn = -1.6;
-                }
-                if ui
-                    .add_enabled(!state.paused, egui::Button::new("Half-turn"))
-                    .clicked()
-                {
-                    state.turn_remaining = std::f32::consts::PI;
-                }
-                if ui
-                    .add_enabled(!state.paused, egui::Button::new("Shake"))
-                    .is_pointer_button_down_on()
-                {
-                    state.shake_remaining = 0.4;
-                }
-            });
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("THE MIXTURE").size(11.0).color(GOLD).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new("shares by area").size(11.0).color(MUTED));
-                });
-            });
-            ui.horizontal(|ui| {
-                if ui.small_button("Sand art").clicked() {
-                    let budget = state.pending.budget;
-                    state.pending = Recipe::balanced();
-                    state.pending.budget = budget;
-                }
-                if ui.small_button("Liquid + bubbles").clicked() {
-                    for (i, m) in state.pending.materials.iter_mut().enumerate() {
-                        m.share = match i {
-                            0 => 70.0,
-                            1 => 10.0,
-                            2 => 20.0,
-                            _ => 0.0,
-                        };
-                    }
-                }
-                if ui.small_button("Remix").clicked() {
-                    let mut recipe = state.recipe.clone();
-                    recipe.seed = recipe.seed.wrapping_add(1);
-                    state.apply(recipe);
-                }
-            });
-            let total_share: f32 = state.pending.materials.iter().map(|m| m.share).sum();
-            let mut actual_area = vec![0.0; state.simulation.materials.len()];
-            for p in &state.simulation.particles {
-                actual_area[p.material] += p.radius * p.radius;
-            }
-            let area: f32 = actual_area.iter().sum();
             egui::ScrollArea::vertical()
-                .max_height((ui.available_height() - 185.0).max(100.0))
-                .show(ui, |ui| {
-                    for (i, m) in state.pending.materials.iter_mut().enumerate() {
-                        ui.horizontal(|ui| {
-                            let (rect, _) =
-                                ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
-                            ui.painter().circle_filled(
-                                rect.center(),
-                                4.0,
-                                Color32::from_rgb(m.color[0], m.color[1], m.color[2]),
-                            );
-                            ui.label(RichText::new(&m.name).size(13.0));
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{:.0}%",
-                                            100.0 * m.share / total_share.max(0.001)
-                                        ))
-                                        .size(12.0)
-                                        .color(MUTED),
-                                    );
-                                },
-                            );
-                        });
-                        ui.add(egui::Slider::new(&mut m.share, 0.0..=100.0).show_value(false));
-                        egui::CollapsingHeader::new(
-                            RichText::new(format!(
-                                "Properties  ·  {:.1}% in vessel",
-                                actual_area[i] / area.max(0.001) * 100.0
-                            ))
-                            .size(10.0)
-                            .color(MUTED),
+                .auto_shrink([false, false])
+                .id_salt("sidebar_scroll")
+                .show(ui, |ui| sidebar_contents(ui, state));
+        });
+}
+
+fn sidebar_contents(ui: &mut egui::Ui, state: &mut Art) {
+    ui.label(
+        RichText::new("S A N D   /   0 1")
+            .size(11.0)
+            .color(GOLD)
+            .strong(),
+    );
+    ui.add_space(12.0);
+    ui.label(RichText::new("Matter in motion.").size(26.0).color(CREAM));
+    ui.label(
+        RichText::new("Mix. Turn. Shake. Settle.")
+            .size(12.0)
+            .color(MUTED),
+    );
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        if ui
+            .add_sized(
+                [121.0, 36.0],
+                egui::Button::new(if state.paused { "Resume" } else { "Pause" }),
+            )
+            .clicked()
+        {
+            state.paused = !state.paused;
+        }
+        if ui
+            .add_sized([121.0, 36.0], egui::Button::new("Reset"))
+            .clicked()
+        {
+            state.apply(state.recipe.clone());
+        }
+    });
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(!state.paused, egui::Button::new("Left"))
+            .is_pointer_button_down_on()
+        {
+            state.button_turn = 1.6;
+        }
+        if ui
+            .add_enabled(!state.paused, egui::Button::new("Right"))
+            .is_pointer_button_down_on()
+        {
+            state.button_turn = -1.6;
+        }
+        if ui
+            .add_enabled(!state.paused, egui::Button::new("Half-turn"))
+            .clicked()
+        {
+            state.turn_remaining = std::f32::consts::PI;
+        }
+        if ui
+            .add_enabled(!state.paused, egui::Button::new("Shake"))
+            .is_pointer_button_down_on()
+        {
+            state.shake_remaining = 0.4;
+        }
+    });
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("THE MIXTURE").size(11.0).color(GOLD).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new("shares by area").size(11.0).color(MUTED));
+        });
+    });
+    mixture_editor(ui, state);
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Particles").color(MUTED));
+        egui::ComboBox::from_id_salt("resolution")
+            .selected_text(format!("{}", state.pending.budget))
+            .show_ui(ui, |ui| {
+                for n in if state.gpu {
+                    vec![12000, 24000, 50000, 100000]
+                } else {
+                    vec![1500, 3000, 6000, 12000, 24000]
+                } {
+                    ui.selectable_value(&mut state.pending.budget, n, format!("{n}"));
+                }
+            });
+    });
+    if ui
+        .add_sized(
+            [ui.available_width(), 36.0],
+            egui::Button::new(RichText::new("Apply mixture").color(PANEL)).fill(GOLD),
+        )
+        .clicked()
+    {
+        state.apply(state.pending.clone());
+    }
+    ui.label(
+        RichText::new(
+            "Percentages, phase, size & count need Apply.\nOther properties and temperature update live.",
+        )
+        .size(10.0)
+        .color(MUTED),
+    );
+    if let Some(error) = &state.error {
+        ui.colored_label(Color32::LIGHT_RED, error);
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    ui.label(
+        RichText::new(format!(
+            "{} particles   ·   {:.0} FPS",
+            state.simulation.particles.len(),
+            1000.0 / state.frame_ms.max(0.1)
+        ))
+        .size(12.0)
+        .color(CREAM),
+    );
+    ui.label(
+        RichText::new(if state.gpu {
+            format!(
+                "GPU · frame {:.1} ms / submit {:.1} ms",
+                state.frame_ms, state.physics_ms
+            )
+        } else {
+            format!(
+                "Frame {:.1} ms / physics {:.1} ms / draw {:.1} ms",
+                state.frame_ms, state.physics_ms, state.drawing_ms
+            )
+        })
+        .size(10.0)
+        .color(MUTED),
+    );
+    if state.clock.dropped_time > 0.1 {
+        ui.label(
+            RichText::new(format!(
+                "Lost simulation time: {:.2}s total",
+                state.clock.dropped_time
+            ))
+            .size(10.0)
+            .color(GOLD),
+        );
+    }
+}
+
+fn mixture_editor(ui: &mut egui::Ui, state: &mut Art) {
+    ui.label(RichText::new("TEMPERATURE").size(11.0).color(GOLD).strong());
+    if ui
+        .add(egui::Slider::new(&mut state.recipe.temperature_c, -20.0..=150.0).text("°C"))
+        .changed()
+    {
+        state.pending.temperature_c = state.recipe.temperature_c;
+        state.refresh_materials();
+    }
+    ui.label(
+        RichText::new("Changes properties and thermal motion; phases stay fixed.")
+            .size(10.0)
+            .color(MUTED),
+    );
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt("material_presets")
+            .width(120.0)
+            .selected_text(state.selected_preset.label())
+            .show_ui(ui, |ui| {
+                for preset in Preset::ALL {
+                    ui.selectable_value(&mut state.selected_preset, preset, preset.label());
+                }
+            });
+        if ui.button("Load").clicked() {
+            let mut next = state.selected_preset.recipe();
+            next.budget = state.pending.budget;
+            next.seed = state.recipe.seed;
+            next.temperature_c = state.recipe.temperature_c;
+            state.apply(next);
+        }
+        if ui.small_button("Remix").clicked() {
+            let mut next = state.recipe.clone();
+            next.seed = next.seed.wrapping_add(1);
+            state.apply(next);
+        }
+    });
+    ui.label(
+        RichText::new("Exact area percentages · other active types rebalance")
+            .size(10.0)
+            .color(MUTED),
+    );
+    let counts = state
+        .recipe
+        .counts()
+        .unwrap_or_else(|_| vec![0; state.recipe.materials.len()]);
+    let actual_area: Vec<f32> = state
+        .recipe
+        .materials
+        .iter()
+        .zip(&counts)
+        .map(|(m, n)| *n as f32 * m.radius * m.radius)
+        .collect();
+    let area: f32 = actual_area.iter().sum();
+    let mut percentage = None;
+    let mut solo = None;
+    let mut live_changed = false;
+    let temperature = state.recipe.temperature_c;
+    egui::ScrollArea::vertical()
+        .max_height((ui.ctx().screen_rect().height() - 725.0).max(90.0))
+        .show(ui, |ui| {
+            for (i, m) in state.pending.materials.iter_mut().enumerate() {
+                let old = m.properties.clone();
+                let old_name = m.name.clone();
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
+                    ui.painter().circle_filled(
+                        rect.center(),
+                        4.0,
+                        Color32::from_rgb(m.color[0], m.color[1], m.color[2]),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut m.name)
+                            .desired_width(90.0)
+                            .hint_text("Name"),
+                    );
+                    if ui
+                        .small_button("Solo")
+                        .on_hover_text("Set this material to 100% and all others to 0%.")
+                        .clicked()
+                    {
+                        solo = Some(i);
+                    }
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut m.share)
+                                .range(0.0..=100.0)
+                                .speed(0.2)
+                                .suffix("%")
+                                .max_decimals(1),
                         )
-                        .id_salt(i)
-                        .show(ui, |ui| {
-                            ui.add(
-                                egui::Slider::new(&mut m.density, 0.02..=10.0)
-                                    .logarithmic(true)
-                                    .text("Density"),
-                            );
-                            ui.add(
-                                egui::Slider::new(&mut m.viscosity, 0.0..=8.0)
-                                    .text("Viscosity / drag"),
-                            );
-                            if m.phase == Phase::Solid {
-                                ui.add(
-                                    egui::Slider::new(&mut m.radius, 0.5..=2.0).text("Grain size"),
-                                );
-                                ui.add(
-                                    egui::Slider::new(&mut m.friction, 0.0..=1.0).text("Friction"),
-                                );
-                            }
-                            ui.horizontal(|ui| {
-                                ui.label("Colour");
-                                ui.color_edit_button_srgb(&mut m.color);
-                            });
-                        });
-                        let live = &mut state.simulation.materials[i];
-                        if live.color != m.color {
-                            state.field.dirty = true;
-                        }
-                        live.density = m.density;
-                        live.viscosity = m.viscosity;
-                        live.friction = m.friction;
-                        live.color = m.color;
-                        let saved = &mut state.recipe.materials[i];
-                        saved.density = m.density;
-                        saved.viscosity = m.viscosity;
-                        saved.friction = m.friction;
-                        saved.color = m.color;
-                        ui.add_space(3.0);
+                        .changed()
+                    {
+                        percentage = Some((i, m.share));
                     }
                 });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Particles").color(MUTED));
-                egui::ComboBox::from_id_salt("resolution")
-                    .selected_text(format!("{}", state.pending.budget))
-                    .show_ui(ui, |ui| {
-                        for n in if state.gpu {
-                            vec![12000, 24000, 50000, 100000]
-                        } else {
-                            vec![1500, 3000, 6000, 12000, 24000]
-                        } {
-                            ui.selectable_value(&mut state.pending.budget, n, format!("{n}"));
-                        }
-                    });
-            });
-            if ui
-                .add_sized(
-                    [ui.available_width(), 36.0],
-                    egui::Button::new(RichText::new("Apply mixture").color(PANEL)).fill(GOLD),
-                )
-                .clicked()
-            {
-                state.apply(state.pending.clone());
-            }
-            ui.label(
-                RichText::new(
-                    "Shares, size & resolution need Apply mixture.\nOther properties change live.",
-                )
-                .size(10.0)
-                .color(MUTED),
-            );
-            if let Some(error) = &state.error {
-                ui.colored_label(Color32::LIGHT_RED, error);
-            }
-            ui.add_space(8.0);
-            ui.separator();
-            ui.label(
-                RichText::new(format!(
-                    "{} particles   ·   {:.0} FPS",
-                    state.simulation.particles.len(),
-                    1000.0 / state.frame_ms.max(0.1)
-                ))
-                .size(12.0)
-                .color(CREAM),
-            );
-            ui.label(
-                RichText::new(if state.gpu {
-                    format!(
-                        "GPU · frame {:.1} ms / submit {:.1} ms",
-                        state.frame_ms, state.physics_ms
-                    )
-                } else {
-                    format!(
-                        "Frame {:.1} ms / physics {:.1} ms / draw {:.1} ms",
-                        state.frame_ms, state.physics_ms, state.drawing_ms
-                    )
-                })
-                .size(10.0)
-                .color(MUTED),
-            );
-            if state.clock.dropped_time > 0.1 {
-                ui.label(
+                if ui
+                    .add(egui::Slider::new(&mut m.share, 0.0..=100.0).show_value(false))
+                    .changed()
+                {
+                    percentage = Some((i, m.share));
+                }
+                let running = actual_area.get(i).copied().unwrap_or(0.) / area.max(0.001) * 100.;
+                egui::CollapsingHeader::new(
                     RichText::new(format!(
-                        "Lost simulation time: {:.2}s total",
-                        state.clock.dropped_time
+                        "{} · properties · in vessel {:.1}%",
+                        m.phase.label(),
+                        running
                     ))
-                    .size(10.0)
-                    .color(GOLD),
-                );
+                    .size(11.0)
+                    .color(MUTED),
+                )
+                .id_salt(("material", i))
+                .show(ui, |ui| material_properties(ui, m, i, temperature));
+                if (old != m.properties || old_name != m.name) && i < state.recipe.materials.len() {
+                    // Size and phase belong to the draft until Apply rebuilds particle geometry.
+                    let saved = &mut state.recipe.materials[i];
+                    let radius = saved.radius;
+                    saved.properties = m.properties.clone();
+                    saved.radius = radius;
+                    saved.name = m.name.clone();
+                    live_changed = true;
+                }
+                ui.add_space(3.0);
             }
         });
+    if let Some((i, value)) = percentage {
+        if let Err(e) = state.pending.set_percentage(i, value) {
+            state.error = Some(e);
+        }
+    }
+    if let Some(i) = solo {
+        let _ = state.pending.set_percentage(i, 100.);
+    }
+    if live_changed {
+        state.refresh_materials();
+    }
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!(
+                "Total {:.1}%",
+                state.pending.materials.iter().map(|m| m.share).sum::<f32>()
+            ))
+            .size(11.0)
+            .color(CREAM),
+        );
+        if ui
+            .add_enabled(
+                state.pending.materials.len() < 16,
+                egui::Button::new("+ Material"),
+            )
+            .clicked()
+        {
+            let n = state.pending.materials.len() + 1;
+            state.pending.materials.push(Material::new(
+                &format!("Material {n}"),
+                Phase::Solid,
+                0.,
+                MaterialProperties::for_phase(Phase::Solid),
+            ));
+        }
+    });
+}
+
+fn material_properties(ui: &mut egui::Ui, m: &mut Material, i: usize, temperature: f32) {
+    ui.label(
+        RichText::new("Reference properties at 20°C")
+            .size(10.0)
+            .color(MUTED),
+    );
+    ui.horizontal(|ui| {
+        ui.label("Phase [Apply]");
+        egui::ComboBox::from_id_salt(("phase", i))
+            .selected_text(m.phase.label())
+            .show_ui(ui, |ui| {
+                for phase in [Phase::Solid, Phase::Liquid, Phase::Gas] {
+                    ui.selectable_value(&mut m.phase, phase, phase.label());
+                }
+            });
+    });
+    ui.add(egui::Slider::new(&mut m.properties.radius, 0.5..=2.0).text("Size [Apply]"));
+    ui.add(
+        egui::Slider::new(&mut m.properties.density, 0.02..=10.0)
+            .logarithmic(true)
+            .text("Density"),
+    );
+    ui.add(egui::Slider::new(&mut m.properties.viscosity, 0.0..=8.0).text("Viscosity / drag"));
+    if m.phase == Phase::Solid {
+        ui.add(egui::Slider::new(&mut m.properties.friction, 0.0..=1.0).text("Friction"));
+    } else {
+        ui.add(
+            egui::Slider::new(&mut m.properties.surface_tension, 0.0..=2.0)
+                .text("Surface cohesion"),
+        );
+        ui.add(
+            egui::Slider::new(&mut m.properties.compression_resistance, 0.05..=1.0)
+                .text("Compression"),
+        );
+        if m.phase == Phase::Liquid {
+            ui.add(
+                egui::Slider::new(&mut m.properties.mixing_resistance, 0.0..=1.0)
+                    .text("Mixing resistance"),
+            );
+        }
+    }
+    egui::CollapsingHeader::new("Temperature response")
+        .id_salt(("thermal", i))
+        .show(ui, |ui| {
+            ui.add(
+                egui::Slider::new(&mut m.properties.thermal_expansion, 0.0..=0.005)
+                    .max_decimals(5)
+                    .text("Expansion / °C"),
+            );
+            ui.add(
+                egui::Slider::new(&mut m.properties.viscosity_temperature, -0.05..=0.05)
+                    .max_decimals(3)
+                    .text("Thinning / °C"),
+            );
+            ui.label(
+                RichText::new("Positive thinning response: thins when heated.")
+                    .size(10.0)
+                    .color(MUTED),
+            );
+            ui.add(
+                egui::Slider::new(&mut m.properties.thermal_motion, 0.0..=4.0)
+                    .logarithmic(true)
+                    .text("Thermal motion"),
+            );
+        });
+    ui.horizontal(|ui| {
+        ui.label("Colour");
+        ui.color_edit_button_srgb(&mut m.properties.color);
+    });
+    let effective = m.at_temperature(temperature);
+    ui.label(
+        RichText::new(format!(
+            "At {:.0}°C: density {:.3}, viscosity {:.3}",
+            temperature, effective.density, effective.viscosity
+        ))
+        .size(10.0)
+        .color(GOLD),
+    );
+    if ui.small_button("Restore phase defaults").clicked() {
+        m.properties = MaterialProperties::for_phase(m.phase);
+    }
 }
 
 fn draw_vessel(ui: &egui::Ui, ctx: &egui::Context, state: &mut Art, center: Pos2, radius: f32) {
@@ -618,6 +769,100 @@ fn draw_vessel(ui: &egui::Ui, ctx: &egui::Context, state: &mut Art, center: Pos2
 #[cfg(test)]
 mod tests {
     use super::*;
+    use particles::material::Recipe;
+    fn editor_frame(
+        ctx: &egui::Context,
+        art: &mut Art,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1360., 900.))),
+                events,
+                ..Default::default()
+            },
+            |ctx| sidebar(ctx, art),
+        )
+    }
+    fn text_rect(output: &egui::FullOutput, label: &str) -> Rect {
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(t) if t.galley.text().contains(label) => {
+                    Some(Rect::from_min_size(t.pos, t.galley.size()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing editor label {label}: {:?}",
+                    output
+                        .shapes
+                        .iter()
+                        .filter_map(|s| if let egui::epaint::Shape::Text(t) = &s.shape {
+                            Some((t.pos, t.galley.text()))
+                        } else {
+                            None
+                        })
+                        .collect::<Vec<_>>()
+                )
+            })
+    }
+    fn click_editor(ctx: &egui::Context, art: &mut Art, pos: Pos2) {
+        editor_frame(
+            ctx,
+            art,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+        editor_frame(
+            ctx,
+            art,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+        );
+    }
+    #[test]
+    fn editor_solo_and_apply_drive_the_real_recipe() {
+        let mut art = crate::tests::fixture();
+        let ctx = egui::Context::default();
+        let mut style = (*ctx.style()).clone();
+        style.spacing.item_spacing = egui::vec2(10., 10.);
+        style.spacing.button_padding = egui::vec2(12., 9.);
+        ctx.set_style(style);
+        let mut output = editor_frame(&ctx, &mut art, vec![]);
+        for _ in 0..3 {
+            output = editor_frame(&ctx, &mut art, vec![]);
+        }
+        let solo = text_rect(&output, "Solo").center();
+        click_editor(&ctx, &mut art, solo);
+        assert_eq!(art.pending.materials[0].share, 100.);
+        assert!(art.pending.materials.iter().skip(1).all(|m| m.share == 0.));
+        assert_eq!(art.recipe.materials[0].share, 44.);
+        output = editor_frame(&ctx, &mut art, vec![]);
+        let apply = text_rect(&output, "Apply mixture");
+        assert!(apply.bottom() < 900., "Apply was clipped: {apply:?}");
+        let footer = text_rect(&output, "Frame ");
+        assert!(
+            footer.bottom() < 900.,
+            "timing controls were clipped: {footer:?}"
+        );
+        click_editor(&ctx, &mut art, apply.center());
+        assert_eq!(art.recipe.materials[0].share, 100.);
+        assert!(art.simulation.particles.iter().all(|p| p.material == 0));
+    }
     #[test]
     fn gas_colour_changes_visible_surface_pixels() {
         let mut recipe = Recipe::balanced();

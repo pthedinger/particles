@@ -19,6 +19,8 @@ struct Params {
     blocks: u32,
     max_radius: f32,
     min_radius: f32,
+    thermal_tick: u32,
+    padding: [u32; 3],
 }
 /// GPU allocations are owned for the lifetime of one mixture.
 pub struct Engine {
@@ -29,6 +31,7 @@ pub struct Engine {
     max_radius: f32,
     min_radius: f32,
     has_grid: bool,
+    thermal_tick: u32,
     state: [wgpu::Buffer; 2],
     pub(super) active: usize,
     pub(super) drawing: super::render::Drawing,
@@ -79,7 +82,7 @@ impl Engine {
         };
         let material_buffer = alloc(
             "GPU materials",
-            16 * 32,
+            16 * 64,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
         queue.write_buffer(&material_buffer, 0, bytemuck::cast_slice(&seed.materials));
@@ -117,7 +120,7 @@ impl Engine {
                     },
                     has_dynamic_offset: binding == 0,
                     min_binding_size: if binding == 0 {
-                        NonZeroU64::new(48)
+                        NonZeroU64::new(64)
                     } else {
                         None
                     },
@@ -139,7 +142,7 @@ impl Engine {
                         resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                             buffer: &params,
                             offset: 0,
-                            size: NonZeroU64::new(48),
+                            size: NonZeroU64::new(64),
                         }),
                     },
                     wgpu::BindGroupEntry {
@@ -213,6 +216,7 @@ impl Engine {
             max_radius,
             min_radius,
             has_grid: false,
+            thermal_tick: 0,
             state,
             active: 0,
             drawing,
@@ -260,6 +264,7 @@ impl Engine {
                     s.angular_speed,
                     glam::Vec2::from_array(s.shake),
                 );
+                self.thermal_tick = self.thermal_tick.wrapping_add(1);
                 let p = Params {
                     n: self.count,
                     side: self.side,
@@ -272,8 +277,10 @@ impl Engine {
                     blocks: cells.div_ceil(256),
                     max_radius: self.max_radius,
                     min_radius: self.min_radius,
+                    thermal_tick: self.thermal_tick,
+                    padding: [0; 3],
                 };
-                packed[i * 256..i * 256 + 48].copy_from_slice(bytemuck::bytes_of(&p));
+                packed[i * 256..i * 256 + 64].copy_from_slice(bytemuck::bytes_of(&p));
             }
             queue.write_buffer(&self.params, 0, &packed);
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {

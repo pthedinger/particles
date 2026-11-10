@@ -27,6 +27,12 @@ pub struct GpuMaterial {
     pub viscosity: f32,
     pub friction: f32,
     pub phase: u32,
+    pub surface_tension: f32,
+    pub compression_resistance: f32,
+    pub mixing_resistance: f32,
+    pub neighbor_target: f32,
+    pub thermal_motion: f32,
+    pub padding: [f32; 3],
 }
 impl From<&Material> for GpuMaterial {
     fn from(m: &Material) -> Self {
@@ -45,6 +51,12 @@ impl From<&Material> for GpuMaterial {
                 Phase::Gas => 1,
                 Phase::Solid => 2,
             },
+            surface_tension: m.surface_tension,
+            compression_resistance: m.compression_resistance,
+            mixing_resistance: m.mixing_resistance,
+            neighbor_target: m.neighbor_target(),
+            thermal_motion: m.thermal_motion,
+            padding: [0.; 3],
         }
     }
 }

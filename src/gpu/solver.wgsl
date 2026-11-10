@@ -2,10 +2,10 @@ struct Particle {
     position: vec2<f32>, velocity: vec2<f32>, radius: f32, material: u32, id: u32, pad: u32
 }
 struct Material {
-    color: vec4<f32>, density: f32, viscosity: f32, friction: f32, phase: u32
+    color: vec4<f32>, density: f32, viscosity: f32, friction: f32, phase: u32, surface_tension:f32, compression_resistance:f32, mixing_resistance:f32, neighbor_target:f32, thermal_motion:f32, padding:array<f32,3>
 }
 struct Params {
-    n: u32, side: u32, h: f32, radius: f32, dt: f32, angular: f32, shake: vec2<f32>, cells: u32, blocks: u32, max_radius:f32, min_radius:f32
+    n: u32, side: u32, h: f32, radius: f32, dt: f32, angular: f32, shake: vec2<f32>, cells: u32, blocks: u32, max_radius:f32, min_radius:f32, thermal_tick:u32, pad0:u32, pad1:u32, pad2:u32
 }
 struct Info {
     previous: vec2<f32>, environment: vec2<f32>, buoyancy: vec2<f32>, lambda: f32, load: f32, damping: vec2<f32>, warm_support: vec2<f32>
@@ -35,6 +35,8 @@ fn volume(p:Particle) -> f32 {
     let r=p.radius/params.radius;
     return r*r;
 }
+fn rest_density(p:Particle)->f32{return volume(p)+materials[p.material].neighbor_target;}
+fn bath_noise(id:u32,tick:u32)->vec2<f32>{var x=id^(tick*747796405u)^2891336453u;x^=x>>16u;x*=2246822519u;x^=x>>13u;x*=3266489917u;x^=x>>16u;return (vec2<f32>(f32(x&65535u),f32(x>>16u))/32767.5-1.0)*1.7320508;}
 fn mass(p:Particle) -> f32 {
     return materials[p.material].density*volume(p);
 }
@@ -201,6 +203,7 @@ fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
     info[p.id].previous=p.position;
     info[p.id].load=0.0;
     p.velocity+=limited(acceleration,18.0)*params.dt;
+    if a.thermal_motion>0.0{p.velocity+=bath_noise(p.id,params.thermal_tick)*a.thermal_motion*sqrt(params.dt);}
     var drag=0.08;
     if a.phase==2u{
         drag=0.3+a.friction*3.0;
@@ -236,6 +239,7 @@ fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
     }
     let xy=cell_xy(p.position);
     var rho=volume(p);
+    let rest=rest_density(p);
     var grad=vec2<f32>(0.0);
     var denominator=0.0;
     for(var y=max(xy.y-1,0);y<=min(xy.y+1,i32(params.side)-1);y++){
@@ -253,17 +257,13 @@ fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
                 let w=max(0.0,1.0-length(d)/params.h);
                 let v=volume(q);
                 rho+=v*w*w;
-                let g=direction(p.id,j,d)*(-2.0*w/params.h/2.65)*v;
+                let g=direction(p.id,j,d)*(-2.0*w/params.h/rest)*v;
                 grad+=g;
                 denominator+=constraint_neighbor_weight(p,q)*dot(g,g);
             }
         }
     }
-    var stiffness=1.0;
-    if a.phase==1u{
-        stiffness=0.25;
-    }
-    info[p.id].lambda=-stiffness*max(rho/2.65-1.0,0.0)/(denominator+pressure_weight(p)*dot(grad,grad)+80.0);
+    info[p.id].lambda=-a.compression_resistance*max(rho/rest-1.0,0.0)/(denominator+pressure_weight(p)*dot(grad,grad)+80.0);
 }
 @compute @workgroup_size(128) fn project(@builtin(global_invocation_id) gid:vec3<u32>) {
     let i=gid.x;
@@ -308,21 +308,21 @@ fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
                 let normal=direction(p.id,j,d);
                 let w=max(0.0,1.0-r/params.h);
                 let wi=mass(q)/(mass(p)+mass(q));
-                let g=normal*(-2.0*w/params.h/2.65);
+                let g=normal*(-2.0*w/params.h);
                 if !(a.phase==1u&&b.phase==0u) {
                     var neighbour_lambda=info[j].lambda;
                     if a.phase==0u&&b.phase==1u{neighbour_lambda=0.0;}
-                    delta+=g*(info[p.id].lambda*volume(q)+neighbour_lambda*volume(p))*pressure_weight(p);
+                    delta+=g*(info[p.id].lambda*volume(q)/rest_density(p)+neighbour_lambda*volume(p)/rest_density(q))*pressure_weight(p);
                 }
                 if p.material==q.material&&a.phase!=2u&&r>p.radius+q.radius{
                     var tension=0.00012;
                     if a.phase==1u{
                         tension=0.0007;
                     }
-                    delta-=normal*(w*w*params.radius*tension*120.0)*wi;
+                    delta-=normal*(w*w*params.radius*tension*a.surface_tension*120.0)*wi;
                 }
                 else if a.phase==0u&&b.phase==0u&&p.material!=q.material{
-                    delta+=normal*(w*w*params.radius*0.007);
+                    delta+=normal*(w*w*params.radius*0.007*sqrt(a.mixing_resistance*b.mixing_resistance));
                 }
                 var contact_distance=0.0;
                 var weight=wi;

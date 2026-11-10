@@ -38,6 +38,7 @@ pub struct Simulation {
     pressure_inverse_mass: Vec<f32>,
     volume: Vec<f32>,
     density: Vec<f32>,
+    rest: Vec<f32>,
     gradient: Vec<Vec2>,
     denominator: Vec<f32>,
     lambda: Vec<f32>,
@@ -49,6 +50,7 @@ pub struct Simulation {
     next: Vec<i32>,
     pairs: Vec<(usize, usize)>,
     contacts: Vec<GrainContact>,
+    thermal_tick: u32,
     support: f32,
     side: usize,
 }
@@ -74,7 +76,7 @@ impl Simulation {
         if recipe
             .materials
             .iter()
-            .any(|m| m.radius * base_radius > 0.3)
+            .any(|m| m.share > 0. && m.radius * base_radius > 0.3)
         {
             return Err(
                 "Increase the resolution: these grains are too large for the vessel.".into(),
@@ -103,7 +105,7 @@ impl Simulation {
             .collect();
         let mut sim = Self {
             particles,
-            materials: recipe.materials.clone(),
+            materials: recipe.effective_materials(),
             base_radius,
             angle: 0.0,
             time: 0.0,
@@ -112,6 +114,7 @@ impl Simulation {
             pressure_inverse_mass: Vec::new(),
             volume: Vec::new(),
             density: Vec::new(),
+            rest: Vec::new(),
             gradient: Vec::new(),
             denominator: Vec::new(),
             lambda: Vec::new(),
@@ -123,6 +126,7 @@ impl Simulation {
             next: Vec::new(),
             pairs: Vec::new(),
             contacts: Vec::new(),
+            thermal_tick: 0,
             support: base_radius * 4.4,
             side: 0,
         };
@@ -137,6 +141,7 @@ impl Simulation {
         self.pressure_inverse_mass.resize(n, 0.0);
         self.volume.resize(n, 1.0);
         self.density.resize(n, 0.0);
+        self.rest.resize(n, 0.);
         self.gradient.resize(n, Vec2::ZERO);
         self.denominator.resize(n, 0.0);
         self.lambda.resize(n, 0.0);
@@ -309,15 +314,18 @@ impl Simulation {
         self.gradient.fill(Vec2::ZERO);
         self.denominator.fill(0.0);
         self.delta.fill(Vec2::ZERO);
-        let rest = 2.65;
+        for (i, p) in self.particles.iter().enumerate() {
+            self.rest[i] = self.volume[i] + self.materials[p.material].neighbor_target();
+        }
+        let rest = &self.rest;
         for &(i, j) in &self.pairs {
             let (direction, r) = self.direction(i, j);
             let q = (1.0 - r / self.support).max(0.0);
             self.density[i] += self.volume[j] * q * q;
             self.density[j] += self.volume[i] * q * q;
-            let grad = direction * (-2.0 * q / self.support / rest);
-            let gi = grad * self.volume[j];
-            let gj = -grad * self.volume[i];
+            let grad = direction * (-2.0 * q / self.support);
+            let gi = grad * (self.volume[j] / rest[i]);
+            let gj = -grad * (self.volume[i] / rest[j]);
             self.gradient[i] += gi;
             self.gradient[j] += gj;
             self.denominator[i] += self.pressure_inverse_mass[j] * gi.length_squared();
@@ -327,11 +335,11 @@ impl Simulation {
             let phase = self.materials[self.particles[i].material].phase;
             // Pressure resists compression; negative pressure would pull grains
             // together through sparse fluid. Phase cohesion is handled below.
-            let c = (self.density[i] / rest - 1.0).max(0.0);
-            let stiffness = match phase {
-                Phase::Liquid => 1.0,
-                Phase::Gas => 0.25,
-                Phase::Solid => 0.0,
+            let c = (self.density[i] / rest[i] - 1.0).max(0.0);
+            let stiffness = if phase == Phase::Solid {
+                0.
+            } else {
+                self.materials[self.particles[i].material].compression_resistance
             };
             self.lambda[i] = -stiffness * c
                 / (self.denominator[i]
@@ -341,8 +349,10 @@ impl Simulation {
         for &(i, j) in &self.pairs {
             let (direction, r) = self.direction(i, j);
             let q = (1.0 - r / self.support).max(0.0);
-            let grad = direction * (-2.0 * q / self.support / rest);
-            let f = grad * (self.lambda[i] * self.volume[j] + self.lambda[j] * self.volume[i]);
+            let grad = direction * (-2.0 * q / self.support);
+            let f = grad
+                * (self.lambda[i] * self.volume[j] / rest[i]
+                    + self.lambda[j] * self.volume[i] / rest[j]);
             self.delta[i] += f * self.pressure_inverse_mass[i];
             self.delta[j] -= f * self.pressure_inverse_mass[j];
             let a = &self.materials[self.particles[i].material];
@@ -356,7 +366,8 @@ impl Simulation {
                 } else {
                     0.00012
                 };
-                let f = direction * (q * q * self.base_radius * tension * 120.0);
+                let f =
+                    direction * (q * q * self.base_radius * tension * a.surface_tension * 120.0);
                 let wi = self.inverse_mass[i] / (self.inverse_mass[i] + self.inverse_mass[j]);
                 self.delta[i] -= f * wi;
                 self.delta[j] += f * (1.0 - wi);
@@ -364,7 +375,11 @@ impl Simulation {
                 && b.phase == Phase::Liquid
                 && self.particles[i].material != self.particles[j].material
             {
-                let f = direction * (q * q * self.base_radius * 0.007);
+                let f = direction
+                    * (q * q
+                        * self.base_radius
+                        * 0.007
+                        * (a.mixing_resistance * b.mixing_resistance).sqrt());
                 self.delta[i] += f;
                 self.delta[j] -= f;
             }
@@ -437,6 +452,7 @@ impl Simulation {
         self.compute_accelerations(motion);
         self.angle = (self.angle + motion.angular_velocity * dt).rem_euclid(std::f32::consts::TAU);
         self.time += dt;
+        self.thermal_tick = self.thermal_tick.wrapping_add(1);
         let speed_limit = self.base_radius * 0.85 / dt;
         for i in 0..self.particles.len() {
             let p = &mut self.particles[i];
@@ -449,6 +465,8 @@ impl Simulation {
                 Phase::Gas => 0.08,
             };
             p.velocity += self.acceleration[i].clamp_length_max(18.0) * dt;
+            p.velocity +=
+                crate::thermal::noise(i as u32, self.thermal_tick) * (m.thermal_motion * dt.sqrt());
             p.velocity += (target - p.velocity) * (1.0 - (-drag * dt).exp());
             p.velocity = p.velocity.clamp_length_max(speed_limit);
             p.position += p.velocity * dt;

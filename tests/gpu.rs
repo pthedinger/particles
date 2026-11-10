@@ -448,3 +448,131 @@ fn gpu_cached_support_disappears_when_grains_separate() {
         }
     }
 }
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_temperature_changes_thermal_motion_without_changing_identity() {
+    let (d, q) = device();
+    let mut recipe = Recipe::balanced();
+    recipe.budget = 100;
+    recipe.materials[2].thermal_motion = 1.;
+    recipe.temperature_c = -20.;
+    let cold = Simulation::seeded(&recipe).unwrap();
+    recipe.temperature_c = 150.;
+    let hot = Simulation::seeded(&recipe).unwrap();
+    let run = |sim: &Simulation, noise: bool| {
+        let mut s = Seed::from(sim);
+        s.particles = vec![p(0., 0., 2)];
+        if !noise {
+            for m in &mut s.materials {
+                m.thermal_motion = 0.;
+            }
+        }
+        let mut e = Engine::new(&d, &q, &s);
+        e.advance(&d, &q, &[Step::default()]);
+        e.read_particles(&d, &q)[0]
+    };
+    let c = run(&cold, true);
+    let h = run(&hot, true);
+    let baseline = run(&cold, false);
+    let delta = |p: GpuParticle| {
+        ((p.velocity[0] - baseline.velocity[0]).powi(2)
+            + (p.velocity[1] - baseline.velocity[1]).powi(2))
+        .sqrt()
+    };
+    assert!(
+        delta(h) > delta(c) * 1.2,
+        "temperature did not change GPU thermal motion"
+    );
+    assert_eq!(h.material, 2);
+    assert_eq!(h.radius, c.radius);
+}
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_material_controls_change_cohesion_mixing_and_compression() {
+    let (d, q) = device();
+    let run = |s: &Seed| {
+        let mut e = Engine::new(&d, &q, s);
+        e.advance(&d, &q, &[Step::default()]);
+        e.read_particles(&d, &q)
+    };
+    let width = |p: &[GpuParticle]| {
+        p.iter()
+            .map(|p| p.position[0])
+            .fold(f32::NEG_INFINITY, f32::max)
+            - p.iter()
+                .map(|p| p.position[0])
+                .fold(f32::INFINITY, f32::min)
+    };
+    let mut s = seed();
+    s.base_radius = 0.02;
+    for m in &mut s.materials {
+        m.thermal_motion = 0.;
+        m.viscosity = 0.;
+        m.surface_tension = 0.;
+        m.mixing_resistance = 0.;
+    }
+    s.particles = vec![p(-0.025, 0., 0), p(0.025, 0., 0)];
+    let neutral = width(&run(&s));
+    s.materials[0].surface_tension = 2.;
+    let cohesive = width(&run(&s));
+    assert!(
+        cohesive < neutral - 1e-6,
+        "cohesion had no effect: {cohesive} / {neutral}"
+    );
+    s.materials[0].surface_tension = 0.;
+    s.particles[1].material = 1;
+    let miscible = width(&run(&s));
+    s.materials[0].mixing_resistance = 1.;
+    s.materials[1].mixing_resistance = 1.;
+    let immiscible = width(&run(&s));
+    assert!(
+        immiscible > miscible + 1e-6,
+        "mixing resistance had no effect"
+    );
+    s.particles = (0..9)
+        .map(|i| {
+            p(
+                (i % 3) as f32 * 0.002 - 0.002,
+                (i / 3) as f32 * 0.002 - 0.002,
+                0,
+            )
+        })
+        .collect();
+    s.materials[0].compression_resistance = 0.05;
+    let soft = width(&run(&s));
+    s.materials[0].compression_resistance = 1.;
+    let firm = width(&run(&s));
+    assert!(
+        firm > soft + 1e-4,
+        "compression control had no effect: {firm} / {soft}"
+    );
+}
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_pure_fluid_size_and_temperature_endpoints_stay_finite() {
+    let (d, q) = device();
+    for (material, radius, temperature) in
+        [(0, 0.5, -20.), (0, 2., 150.), (2, 0.5, 150.), (2, 2., -20.)]
+    {
+        let mut recipe = Recipe::balanced();
+        recipe.budget = 12_000;
+        recipe.set_percentage(material, 100.).unwrap();
+        recipe.materials[material].radius = radius;
+        recipe.temperature_c = temperature;
+        let seed = Seed::from(&Simulation::seeded(&recipe).unwrap());
+        let mut engine = Engine::new(&d, &q, &seed);
+        engine.advance(&d, &q, &vec![Step::default(); 240]);
+        let out = engine.read_particles(&d, &q);
+        assert_eq!(out.len(), recipe.budget);
+        assert!(out
+            .iter()
+            .enumerate()
+            .all(|(i, p)| p.id == i as u32 && p.material == material as u32));
+        assert!(out.iter().all(
+            |p| p.position.iter().chain(&p.velocity).all(|v| v.is_finite())
+                && p.position[0].hypot(p.position[1]) + p.radius <= 1.001
+        ));
+    }
+}
