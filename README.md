@@ -35,6 +35,28 @@ Size (0.5–2×), phase, percentages and count are draft changes until **Apply m
 
 Properties are defined at **20°C** and kept separate from derived values, so returning to 20°C restores them exactly. Heating usually lowers liquid density and viscosity; the signs and strengths can be adjusted per material. Gas target concentration decreases with absolute temperature. Thermal motion adds bounded, zero-mean velocity diffusion with strength proportional to the square root of absolute temperature; set its strength to zero to disable it. Temperature is a uniform external bath, with no heat transport, latent heat, freezing, melting or boiling. These are phenomenological responses for visual experiments, not calibrated thermodynamics; particle identity, count and geometric size remain fixed while temperature changes.
 
+## Vessels
+
+Use the **Vessel** selector above the scene and press **Load vessel**. Loading resets particle placement while retaining the current applied materials, temperature and particle count. Unapplied material edits remain in the sidebar draft. Material presets, Reset and particle Remix keep the chosen vessel.
+
+- **Circle** keeps the original sand-art frame.
+- **Square** adds rounded corners for piles and layered overturns.
+- **Hourglass** starts in the upper chamber and pours through an open neck. Larger grains and friction can cause jamming; there is no calibrated countdown or automatic particle deletion.
+- **Cascade shelves** catches particles on alternating rounded ledges, with gaps at alternating ends.
+- **Rock garden** combines an irregular convex outline with fixed rounded obstacles. **New layout** rebuilds the outline/obstacles; Reset repeats that layout, and Remix only changes particle placement.
+
+The walls, shelves and obstacles rotate together; gravity stays downward. Drag the outer circular guide, or use the existing turn/half-turn/shake controls. Pause freezes both particles and vessel motion. These are fixed geometry presets; drawing or moving individual obstacles is not included.
+
+```sh
+cargo run --release --bin particles -- --vessel hourglass
+cargo run --release --bin particles -- --vessel cascade
+cargo run --release --bin particles -- --vessel garden --particles 50000
+```
+
+Particle sizes scale with the available initialization area. Hourglass starts with its lower chamber empty, so its grains are smaller at the same particle count. Mixture percentages still describe the relative area of the materials, rather than a vessel fill slider. Insufficient room for a particle size produces an error and leaves the running scene intact.
+
+Noncircular vessels use one immutable 512-square distance/normal map for collision and drawing, with radius-aware wall projection and moving-wall velocity response. Fluid neighbour interaction is rejected across solid barriers. Visibility uses exact edge/rounded-primitive checks, an exact neck-plane test for Hourglass, and conservative short-segment bounds to avoid work when an obstacle cannot intersect a neighbour segment. Map sampling approximates sharp corners; rounded shelves and obstacles are intentional. Circle retains its analytical boundary path. The GPU grid cell size is bounded independently of physical interaction radius so compact 100k recipes fit the scan. Geometry resources rebuild only with the vessel/layout, and ordinary frames continue to keep particle state on the GPU.
+
 ## Physics and rendering
 
 The headless core uses a fixed 1/120-second step, reusable uniform spatial bins and position-based fluid/contact constraints. Materials have separate identities, density, viscosity, radius and friction. Liquids resist compression, gas parcels are more compressible and cohesive, and grains resolve contacts with load-limited friction. Solid grains have no viscous connection to each other. Phase cohesion is separate from compression pressure.
@@ -80,7 +102,7 @@ A windowed scripted test exercises rotation, shaking and pause/resume, captures 
 cargo run --release --bin particles -- --smoke-frames 1800 --scripted --screenshot /tmp/sand-art.png --report /tmp/sand-art.txt
 ```
 
-Measured results for this development machine are recorded in [docs/performance.md](docs/performance.md). They are machine- and workload-specific, not a guarantee for other systems. The latest scripted run at 100,000 particles measured 59.2 FPS median and a 0.996 simulation/wall-time ratio, with 0.033 seconds dropped after warmup. See the performance report for the tested workload and limitations; one million particles remains future work.
+Measured results for this development machine are recorded in [docs/performance.md](docs/performance.md). They are machine- and workload-specific, not a guarantee for other systems. Current vessel-specific timing and physical-clock progress are recorded in that report. The 100,000-particle default remains; complex vessels, material choices and motion can be substantially slower. One million particles remains future work.
 
 ## Original experiment
 

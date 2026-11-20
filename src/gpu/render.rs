@@ -6,16 +6,50 @@ pub(super) struct Drawing {
     composite: wgpu::RenderPipeline,
     field: wgpu::TextureView,
     composite_group: wgpu::BindGroup,
+    pose: wgpu::Buffer,
 }
 impl Drawing {
     pub fn new(
         device: &wgpu::Device,
         states: &[wgpu::Buffer; 2],
         materials: &wgpu::Buffer,
+        boundary: &wgpu::TextureView,
+        boundary_sampler: &wgpu::Sampler,
     ) -> Self {
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("particle draw layout"),
-            entries: &[0, 1].map(|binding| wgpu::BindGroupLayoutEntry {
+        let pose = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vessel drawing pose"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let boundary_entry = wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let pose_entry = wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: std::num::NonZeroU64::new(16),
+            },
+            count: None,
+        };
+        let sampler_entry = wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
+        let mut particle_entries: Vec<_> = [0, 1]
+            .map(|binding| wgpu::BindGroupLayoutEntry {
                 binding,
                 visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
@@ -24,7 +58,13 @@ impl Drawing {
                     min_binding_size: None,
                 },
                 count: None,
-            }),
+            })
+            .into_iter()
+            .collect();
+        particle_entries.extend([boundary_entry, pose_entry, sampler_entry]);
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("particle draw layout"),
+            entries: &particle_entries,
         });
         let groups = std::array::from_fn(|i| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -39,12 +79,31 @@ impl Drawing {
                         binding: 1,
                         resource: materials.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(boundary),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: pose.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(boundary_sampler),
+                    },
                 ],
             })
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("particle drawing"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("draw.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "{}\n{}",
+                    include_str!("draw.wgsl"),
+                    include_str!("vessel.wgsl")
+                )
+                .into(),
+            ),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
@@ -139,6 +198,9 @@ impl Drawing {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                boundary_entry,
+                pose_entry,
+                sampler_entry,
             ],
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -158,11 +220,30 @@ impl Drawing {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(boundary),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: pose.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(boundary_sampler),
+                },
             ],
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fluid composite"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("composite.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "{}\n{}",
+                    include_str!("composite.wgsl"),
+                    include_str!("vessel.wgsl")
+                )
+                .into(),
+            ),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
@@ -200,6 +281,7 @@ impl Drawing {
             composite,
             field,
             composite_group,
+            pose,
         }
     }
     pub fn draw(
@@ -209,7 +291,14 @@ impl Drawing {
         output: &wgpu::TextureView,
         active: usize,
         count: u32,
+        angle: f32,
+        kind: u32,
     ) {
+        queue.write_buffer(
+            &self.pose,
+            0,
+            bytemuck::cast_slice(&[angle.cos(), angle.sin(), kind as f32, 0.]),
+        );
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("GPU vessel drawing"),
         });
@@ -259,7 +348,14 @@ impl Drawing {
 }
 impl Engine {
     pub fn draw(&self, device: &wgpu::Device, queue: &wgpu::Queue, output: &wgpu::TextureView) {
-        self.drawing
-            .draw(device, queue, output, self.active, self.count);
+        self.drawing.draw(
+            device,
+            queue,
+            output,
+            self.active,
+            self.count,
+            self.angle,
+            self.vessel_kind,
+        );
     }
 }

@@ -5,10 +5,10 @@ struct Material {
     color: vec4<f32>, density: f32, viscosity: f32, friction: f32, phase: u32, surface_tension:f32, compression_resistance:f32, mixing_resistance:f32, neighbor_target:f32, thermal_motion:f32, padding:array<f32,3>
 }
 struct Params {
-    n: u32, side: u32, h: f32, radius: f32, dt: f32, angular: f32, shake: vec2<f32>, cells: u32, blocks: u32, max_radius:f32, min_radius:f32, thermal_tick:u32, pad0:u32, pad1:u32, pad2:u32
+    n: u32, side: u32, h: f32, radius: f32, dt: f32, angular: f32, shake: vec2<f32>, cells: u32, blocks: u32, max_radius:f32, min_radius:f32, thermal_tick:u32, angle:f32, cell_size:f32, vessel_kind:u32, pose:vec2<f32>, previous_pose:vec2<f32>
 }
 struct Info {
-    previous: vec2<f32>, environment: vec2<f32>, buoyancy: vec2<f32>, lambda: f32, load: f32, damping: vec2<f32>, warm_support: vec2<f32>
+    previous: vec2<f32>, environment: vec2<f32>, buoyancy: vec2<f32>, lambda: f32, load: f32, damping: vec2<f32>, warm_support: vec2<f32>, wall_distance:f32, pad0:f32, pad1:f32, pad2:f32
 }
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> src: array<Particle>;
@@ -17,9 +17,11 @@ struct Info {
 @group(0) @binding(4) var<storage, read_write> info: array<Info>;
 @group(0) @binding(5) var<storage, read_write> counts: array<atomic<u32>>;
 @group(0) @binding(6) var<storage, read_write> offsets: array<u32>;
+@group(0) @binding(7) var boundary_map:texture_2d<f32>;
+@group(0) @binding(8) var boundary_sampler:sampler;
 var<workgroup> scan: array<u32, 512>;
 fn cell_xy(p: vec2<f32>) -> vec2<i32> {
-    return clamp(vec2<i32>(floor((p + 1.0)/params.h)) + 1, vec2<i32>(0), vec2<i32>(i32(params.side)-1));
+    return clamp(vec2<i32>(floor((p + 1.0)/params.cell_size)) + 1, vec2<i32>(0), vec2<i32>(i32(params.side)-1));
 }
 fn cell_id(p: vec2<f32>) -> u32 {
     let xy=cell_xy(p);
@@ -53,8 +55,16 @@ fn constraint_neighbor_weight(p:Particle,q:Particle)->f32 {
     if materials[p.material].phase==0u&&materials[q.material].phase==1u{return 0.0;}
     return pressure_weight(q);
 }
-fn in_support(p:Particle,q:Particle)->bool {
-    let d=p.position-q.position;return dot(d,d)<params.h*params.h;
+fn in_support(p:Particle,q:Particle,wall_margin:f32)->bool {
+    let d=p.position-q.position;
+    if dot(d,d)>=params.h*params.h{return false;}
+    // Cached at the last grid build. Environment/prediction conservatively add
+    // wall motion since the previous step; constraint passes use current positions.
+    if NEEDS_VISIBILITY&&(!CACHE_VISIBILITY||min(info[p.id].wall_distance,info[q.id].wall_distance)<params.h*1.5+params.max_radius+wall_margin+0.0087){
+        let pose=select(params.pose,params.previous_pose,wall_margin>0.0);
+        if !clear_segment(p.position,q.position,pose){return false;}
+    }
+    return true;
 }
 fn limited(v:vec2<f32>, maximum:f32)->vec2<f32>{
     return v*min(1.0,maximum/max(length(v),1e-10));
@@ -69,7 +79,41 @@ fn direction(i:u32,j:u32,d:vec2<f32>)->vec2<f32>{
     return select(-v,v,i<j);
 }
 fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
-    return limited(p,1.0-r);
+    if VESSEL_KIND==0u{return limited(p,1.0-r);}
+    var out=p;
+    for(var j=0u;j<4u;j++){
+        let wall=boundary(out);if wall.x>=r{break;}
+        out+=wall.yz*(r-wall.x+0.00001);
+    }
+    return out;
+}
+fn boundary(p:vec2<f32>)->vec3<f32>{return vessel_sample(p,params.pose,VESSEL_KIND==0u);}
+fn cross2(a:vec2<f32>,b:vec2<f32>)->f32{return a.x*b.y-a.y*b.x;}
+fn point_segment_squared(p:vec2<f32>,a:vec2<f32>,b:vec2<f32>)->f32 {
+    let v=b-a;let q=p-a-v*clamp(dot(p-a,v)/max(dot(v,v),1e-12),0.0,1.0);return dot(q,q);
+}
+fn segments_intersect(a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,d:vec2<f32>)->bool{
+    let r=b-a;let s=d-c;let denominator=cross2(r,s);if abs(denominator)<1e-12{return false;}
+    let t=cross2(c-a,s)/denominator;let u=cross2(c-a,r)/denominator;
+    return t>=0.0&&t<=1.0&&u>=0.0&&u<=1.0;
+}
+fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
+    if VESSEL_KIND==0u{return contained(destination,r);}
+    let angle_delta=params.angular*params.dt;
+    let movement=destination-start;
+    let relative=length(movement)+abs(angle_delta)*(max(length(start),length(destination))+r);
+    let pieces=u32(clamp(ceil(relative/0.012),1.0,16.0));
+    var p=start;
+    for(var j=1u;j<=pieces;j++) {
+        p+=movement/f32(pieces);
+        let angle=params.angle-angle_delta*(1.0-f32(j)/f32(pieces));
+        let pose=vec2<f32>(cos(angle),sin(angle));
+        for(var k=0u;k<4u;k++){
+            let wall=vessel_sample(p,pose,false);if wall.x>=r{break;}
+            p+=wall.yz*(r-wall.x+0.00001);
+        }
+    }
+    return p;
 }
 @compute @workgroup_size(256) fn clear(@builtin(global_invocation_id) gid:vec3<u32>) {
     if gid.x<params.cells {
@@ -78,7 +122,11 @@ fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
     }
 }
 @compute @workgroup_size(256) fn histogram(@builtin(global_invocation_id) gid:vec3<u32>) {
-    if gid.x<params.n{atomicAdd(&counts[cell_id(src[gid.x].position)],1u);}
+    if gid.x<params.n{
+        let p=src[gid.x];
+        atomicAdd(&counts[cell_id(p.position)],1u);
+        if CACHE_VISIBILITY{info[p.id].wall_distance=boundary(p.position).x;}
+    }
 }
 @compute @workgroup_size(256) fn scan_cells(@builtin(global_invocation_id) gid:vec3<u32>,@builtin(local_invocation_id) lid:vec3<u32>,@builtin(workgroup_id) group:vec3<u32>) {
     var v=0u;
@@ -145,7 +193,7 @@ fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
                 if j==p.id{
                     continue;
                 }
-                if !in_support(p,q){continue;}
+                if !in_support(p,q,abs(params.angular)*params.dt*1.5+0.0001){continue;}
                 let b=materials[q.material];
                 if a.phase==2u&&b.phase==2u{let d=p.position-q.position;let reach=p.radius+q.radius+0.000001;if dot(d,d)<=reach*reach{touching=true;}}
                 if b.phase==0u&&(a.phase!=0u||p.material!=q.material){
@@ -189,10 +237,10 @@ fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
                     if j==p.id{
                         continue;
                     }
-                if !in_support(p,q){continue;}
                     let b=materials[q.material];
                     let env=info[j].environment;
                     if env.y>0.0001&&(b.phase!=0u||p.material!=q.material){
+                        if !in_support(p,q,abs(params.angular)*params.dt*1.5+0.0001){continue;}
                         let w=max(0.0,1.0-distance(p.position,q.position)/params.h);
                         acceleration-=info[j].buoyancy*(w*w/env.y)*(mass(q)/mass(p));
                     }
@@ -215,11 +263,11 @@ fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
     p.velocity+=(wall_velocity-p.velocity)*(1.0-exp(-drag*params.dt));
     // A world-space bound: changing resolution does not secretly slow the clock or flow.
     p.velocity=limited(p.velocity,2.5);
-    let free_position=contained(p.position+p.velocity*params.dt,p.radius);
+    let free_position=swept_container(p.position,p.position+p.velocity*params.dt,p.radius);
     if a.phase==2u{
         let support=limited(info[p.id].warm_support*0.95,3.6);
         let correction=support*params.dt*params.dt;
-        p.position=contained(info[p.id].previous+limited(free_position+correction-info[p.id].previous,2.5*params.dt),p.radius);
+        p.position=swept_container(info[p.id].previous,info[p.id].previous+limited(free_position+correction-info[p.id].previous,2.5*params.dt),p.radius);
         let applied=p.position-free_position;
         info[p.id].warm_support=applied/(params.dt*params.dt);
         info[p.id].load=length(applied);
@@ -251,7 +299,7 @@ fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
                 if j==p.id{
                     continue;
                 }
-                if !in_support(p,q){continue;}
+                if !in_support(p,q,0.0){continue;}
                 if a.phase==1u&&materials[q.material].phase==0u{continue;}
                 let d=p.position-q.position;
                 let w=max(0.0,1.0-length(d)/params.h);
@@ -287,7 +335,6 @@ fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
                 if j==p.id{
                     continue;
                 }
-                if !in_support(p,q){continue;}
                 let b=materials[q.material];
                 let d=p.position-q.position;
                 // Grains receive no fluid pressure projection. Only actual grain
@@ -296,6 +343,7 @@ fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
                     if b.phase!=2u||dot(d,d)>=(p.radius+q.radius)*(p.radius+q.radius){
                         continue;
                     }
+                    if !in_support(p,q,0.0){continue;}
                     let r=length(d);
                     let normal=direction(p.id,j,d);
                     let overlap=p.radius+q.radius-r;
@@ -304,6 +352,7 @@ fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
                     load+=min(overlap*wi*0.85,p.radius*0.4);
                     continue;
                 }
+                if !in_support(p,q,0.0){continue;}
                 let r=length(d);
                 let normal=direction(p.id,j,d);
                 let w=max(0.0,1.0-r/params.h);
@@ -366,6 +415,7 @@ fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
                 if q.id==p.id{
                     continue;
                 }
+                if !in_support(p,q,0.0){continue;}
                 let b=materials[q.material];
                 let r=distance(p.position,q.position);
                 let wi=mass(q)/(mass(p)+mass(q));
@@ -402,7 +452,7 @@ fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
                 if j==p.id{
                     continue;
                 }
-                if !in_support(p,q){continue;}
+                if !in_support(p,q,0.0){continue;}
                 let b=materials[q.material];
                 let d=p.position-q.position;
                 let r=length(d);
@@ -428,9 +478,11 @@ fn contained(p:vec2<f32>,r:f32)->vec2<f32>{
         }
     }
     velocity+=damping;
-    if length(p.position)>=1.0-p.radius-0.00005{
-        let n=normalize(p.position);
-        velocity-=n*max(dot(velocity,n),0.0);
+    let wall=boundary(p.position);
+    if wall.x<=p.radius+0.00005{
+        let n=wall.yz;
+        let moving_wall=vec2<f32>(-p.position.y,p.position.x)*params.angular;
+        velocity-=n*min(dot(velocity-moving_wall,n),0.0);
         if a.phase==2u{
             let wall_velocity=vec2<f32>(-p.position.y,p.position.x)*params.angular;
             velocity+=(wall_velocity-velocity)*a.friction*0.25;
@@ -454,7 +506,7 @@ fn swept_contacts(@builtin(global_invocation_id) gid:vec3<u32>) {
     var earliest=2.0;var correction=vec2<f32>(0.0);
     for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
         let c=u32(y)*params.side+u32(x);let reach=bitcast<f32>(atomicLoad(&counts[params.cells+c]));if reach==0.0{continue;}
-        let cell_lo=(vec2<f32>(f32(x),f32(y))-1.0)*params.h-1.0;let cell_hi=cell_lo+params.h;
+        let cell_lo=(vec2<f32>(f32(x),f32(y))-1.0)*params.cell_size-1.0;let cell_hi=cell_lo+params.cell_size;
         let sweep_lo=min(old,p.position)-vec2<f32>(p.radius+reach);let sweep_hi=max(old,p.position)+vec2<f32>(p.radius+reach);
         if any(cell_hi<sweep_lo)||any(cell_lo>sweep_hi){continue;}
         for(var k=cell_start(c);k<cell_start(c+1u);k++){

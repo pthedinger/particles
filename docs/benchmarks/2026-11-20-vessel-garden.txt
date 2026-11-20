@@ -1,0 +1,6 @@
+GPU windowed: target 100000 particles; 90 measured frames
+Frame median 17.651 ms (56.7 FPS), p95 18.379 ms
+CPU submit median 1.545 ms (not GPU execution time)
+Simulation 1.575 s / active wall 1.576 s; ratio 0.999; dropped 0.000 s
+Actual GPU state: finite/contained true; identities preserved true; visible pixels 356790
+Grains: 37159; mean y -0.459; upper/open 9873/37159

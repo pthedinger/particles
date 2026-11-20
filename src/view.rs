@@ -21,6 +21,10 @@ pub struct FluidField {
     texture: Option<egui::TextureHandle>,
     dirty: bool,
     weights: Vec<[f32; 8]>,
+    vessel_frame: Option<(
+        std::sync::Arc<particles::vessel::Vessel>,
+        egui::TextureHandle,
+    )>,
     image: egui::ColorImage,
 }
 impl FluidField {
@@ -28,6 +32,7 @@ impl FluidField {
         Self {
             texture: None,
             dirty: true,
+            vessel_frame: None,
             weights: vec![[0.0; 8]; FIELD_SIZE * FIELD_SIZE],
             image: egui::ColorImage::new([FIELD_SIZE, FIELD_SIZE], Color32::TRANSPARENT),
         }
@@ -77,7 +82,7 @@ impl FluidField {
         for (i, field) in self.weights.iter().enumerate() {
             let x = (i % FIELD_SIZE) as f32 / scale - 1.0;
             let y = 1.0 - (i / FIELD_SIZE) as f32 / scale;
-            if x * x + y * y > 1.0 {
+            if sim.vessel.clearance(glam::Vec2::new(x, y), sim.angle) < 0. {
                 self.image.pixels[i] = Color32::TRANSPARENT;
                 continue;
             }
@@ -166,7 +171,8 @@ pub fn run_ui(
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!(
-                        "THE VESSEL   /   {:03.0}°",
+                        "{}   /   {:03.0}°",
+                        state.recipe.vessel.label().to_uppercase(),
                         state.simulation.angle.to_degrees()
                     ))
                     .size(11.0)
@@ -185,6 +191,7 @@ pub fn run_ui(
                     );
                 });
             });
+            vessel_selector(ui, state);
             let mut rect = ui.available_rect_before_wrap();
             rect.max.y -= 40.0;
             let radius = ((rect.width().min(rect.height()) - 70.0) * 0.5).max(10.0);
@@ -251,11 +258,42 @@ pub fn run_ui(
             ui.painter().text(
                 footer,
                 egui::Align2::CENTER_CENTER,
-                "Drag the rim to turn  ·  Left / Right rotate  ·  S shake  ·  Space pause",
+                "Drag the outer guide to turn  ·  Left / Right rotate  ·  S shake  ·  Space pause",
                 FontId::proportional(13.0),
                 MUTED,
             );
         });
+}
+
+fn vessel_selector(ui: &mut egui::Ui, state: &mut Art) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Vessel");
+        egui::ComboBox::from_id_salt("vessel_kind")
+            .width(145.)
+            .selected_text(state.selected_vessel.label())
+            .show_ui(ui, |ui| {
+                for kind in particles::vessel::VesselKind::ALL {
+                    ui.selectable_value(&mut state.selected_vessel, kind, kind.label());
+                }
+            });
+        if ui
+            .button("Load vessel")
+            .on_hover_text("Resets placement, keeping your materials and unapplied draft.")
+            .clicked()
+        {
+            state.load_vessel(state.selected_vessel);
+        }
+        if state.recipe.vessel == particles::vessel::VesselKind::RockGarden
+            && ui.button("New layout").clicked()
+        {
+            state.reroll_layout();
+        }
+        ui.label(
+            RichText::new("Loading resets particle placement")
+                .size(10.)
+                .color(MUTED),
+        );
+    });
 }
 
 fn sidebar(ctx: &egui::Context, state: &mut Art) {
@@ -441,11 +479,7 @@ fn mixture_editor(ui: &mut egui::Ui, state: &mut Art) {
                 }
             });
         if ui.button("Load").clicked() {
-            let mut next = state.selected_preset.recipe();
-            next.budget = state.pending.budget;
-            next.seed = state.recipe.seed;
-            next.temperature_c = state.recipe.temperature_c;
-            state.apply(next);
+            state.load_material_preset(state.selected_preset);
         }
         if ui.small_button("Remix").clicked() {
             let mut next = state.recipe.clone();
@@ -663,31 +697,102 @@ fn material_properties(ui: &mut egui::Ui, m: &mut Material, i: usize, temperatur
     }
 }
 
+fn draw_cpu_vessel_frame(
+    ctx: &egui::Context,
+    state: &mut Art,
+    painter: &egui::Painter,
+    center: Pos2,
+    radius: f32,
+) {
+    let vessel = &state.simulation.vessel;
+    if state
+        .field
+        .vessel_frame
+        .as_ref()
+        .is_none_or(|(v, _)| !std::sync::Arc::ptr_eq(v, vessel))
+    {
+        let side = 512;
+        let mut image = egui::ColorImage::new([side, side], Color32::TRANSPARENT);
+        for y in 0..side {
+            for x in 0..side {
+                let p = glam::Vec2::new(
+                    x as f32 / (side - 1) as f32 * 2. - 1.,
+                    1. - y as f32 / (side - 1) as f32 * 2.,
+                );
+                if p.length() > 1. {
+                    continue;
+                }
+                let d = vessel.clearance(p, 0.);
+                image.pixels[y * side + x] = if d >= 0. {
+                    Color32::from_rgb(14, 31, 40)
+                } else if d >= -0.022 {
+                    Color32::from_rgb(170, 146, 95)
+                } else {
+                    Color32::from_rgb(21, 35, 42)
+                };
+            }
+        }
+        state.field.vessel_frame = Some((
+            vessel.clone(),
+            ctx.load_texture("vessel walls", image, egui::TextureOptions::LINEAR),
+        ));
+    }
+    let texture = &state.field.vessel_frame.as_ref().unwrap().1;
+    let mut mesh = egui::Mesh::with_texture(texture.id());
+    for (p, uv) in [
+        ((-1., 1.), (0., 0.)),
+        ((1., 1.), (1., 0.)),
+        ((1., -1.), (1., 1.)),
+        ((-1., -1.), (0., 1.)),
+    ] {
+        let q = glam::Vec2::from_angle(state.simulation.angle).rotate(glam::Vec2::new(p.0, p.1));
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: center + egui::vec2(q.x, -q.y) * radius,
+            uv: Pos2::new(uv.0, uv.1),
+            color: Color32::WHITE,
+        });
+    }
+    mesh.indices.extend([0, 1, 2, 0, 2, 3]);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 fn draw_vessel(ui: &egui::Ui, ctx: &egui::Context, state: &mut Art, center: Pos2, radius: f32) {
     let painter = ui.painter();
-    painter.circle_filled(
-        center + egui::vec2(0.0, 12.0),
-        radius + 22.0,
-        Color32::from_black_alpha(50),
-    );
-    painter.circle_filled(center, radius + 17.0, Color32::from_rgb(43, 54, 57));
-    painter.circle_stroke(
-        center,
-        radius + 17.0,
-        Stroke::new(1.0, Color32::from_rgb(87, 98, 96)),
-    );
-    painter.circle_stroke(
-        center,
-        radius + 10.0,
-        Stroke::new(8.0, Color32::from_rgb(137, 123, 92)),
-    );
-    painter.circle_stroke(
-        center,
-        radius + 10.0,
-        Stroke::new(1.0, Color32::from_rgb(201, 181, 132)),
-    );
-    painter.circle_filled(center, radius + 4.0, Color32::from_rgb(7, 17, 23));
-    painter.circle_filled(center, radius, Color32::from_rgb(14, 31, 40));
+    let circle = state.recipe.vessel == particles::vessel::VesselKind::Circle;
+    if circle {
+        painter.circle_filled(
+            center + egui::vec2(0.0, 12.0),
+            radius + 22.0,
+            Color32::from_black_alpha(50),
+        );
+        painter.circle_filled(center, radius + 17.0, Color32::from_rgb(43, 54, 57));
+        painter.circle_stroke(
+            center,
+            radius + 17.0,
+            Stroke::new(1.0, Color32::from_rgb(87, 98, 96)),
+        );
+        painter.circle_stroke(
+            center,
+            radius + 10.0,
+            Stroke::new(8.0, Color32::from_rgb(137, 123, 92)),
+        );
+        painter.circle_stroke(
+            center,
+            radius + 10.0,
+            Stroke::new(1.0, Color32::from_rgb(201, 181, 132)),
+        );
+        painter.circle_filled(center, radius + 4.0, Color32::from_rgb(7, 17, 23));
+        painter.circle_filled(center, radius, Color32::from_rgb(14, 31, 40));
+    } else {
+        painter.circle_stroke(
+            center,
+            radius + 19.,
+            Stroke::new(1., Color32::from_rgb(45, 65, 70)),
+        );
+        if !state.gpu {
+            draw_cpu_vessel_frame(ctx, state, painter, center, radius);
+        }
+    }
     if let Some(texture) = state.gpu_texture {
         painter.image(
             texture,

@@ -77,6 +77,8 @@ pub struct Seed {
     pub particles: Vec<GpuParticle>,
     pub materials: Vec<GpuMaterial>,
     pub base_radius: f32,
+    pub vessel: std::sync::Arc<crate::vessel::Vessel>,
+    pub angle: f32,
 }
 impl From<&Simulation> for Seed {
     fn from(sim: &Simulation) -> Self {
@@ -84,6 +86,8 @@ impl From<&Simulation> for Seed {
             particles: sim.particles.iter().map(Into::into).collect(),
             materials: sim.materials.iter().map(Into::into).collect(),
             base_radius: sim.base_radius,
+            vessel: sim.vessel.clone(),
+            angle: sim.angle,
         }
     }
 }

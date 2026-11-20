@@ -11,6 +11,7 @@ use particles::{
     controls::{bounded_motion, rotation_step, Clock, FIXED_DT},
     material::Recipe,
     simulation::Simulation,
+    vessel::VesselKind,
 };
 use std::time::Instant;
 
@@ -27,6 +28,7 @@ pub struct Art {
     pub reported: bool,
     pub recipe: Recipe,
     pub pending: Recipe,
+    pub selected_vessel: VesselKind,
     pub selected_preset: particles::material::Preset,
     pub clock: Clock,
     pub paused: bool,
@@ -57,6 +59,35 @@ pub struct Options {
 }
 
 impl Art {
+    pub fn load_vessel(&mut self, kind: VesselKind) {
+        self.apply_vessel(kind, self.recipe.layout_seed);
+    }
+    pub fn reroll_layout(&mut self) {
+        self.apply_vessel(self.recipe.vessel, self.recipe.layout_seed.wrapping_add(1));
+    }
+    fn apply_vessel(&mut self, kind: VesselKind, layout_seed: u64) {
+        let mut draft = self.pending.clone();
+        let revision = self.revision;
+        let mut next = self.recipe.clone();
+        next.vessel = kind;
+        next.layout_seed = layout_seed;
+        self.apply(next);
+        if self.revision != revision {
+            draft.vessel = kind;
+            draft.layout_seed = layout_seed;
+            self.pending = draft;
+        }
+    }
+    pub fn load_material_preset(&mut self, preset: particles::material::Preset) {
+        let mut next = preset.recipe();
+        next.vessel = self.recipe.vessel;
+        next.layout_seed = self.recipe.layout_seed;
+        next.budget = self.pending.budget;
+        next.seed = self.recipe.seed;
+        next.temperature_c = self.recipe.temperature_c;
+        self.apply(next);
+    }
+
     pub fn refresh_materials(&mut self) {
         self.simulation.materials = self.recipe.effective_materials();
         self.field.invalidate();
@@ -80,6 +111,7 @@ impl Art {
                 self.measurement_end = None;
                 self.reported = false;
                 self.options.screenshot_result = Default::default();
+                self.selected_vessel = recipe.vessel;
                 self.recipe = recipe.clone();
                 self.pending = recipe;
                 self.field.invalidate();
@@ -108,6 +140,11 @@ fn main() {
         let next = || args.get(i + 1).cloned().unwrap_or_default();
         match args[i].as_str() {
             "--cpu" => {}
+            "--vessel" => {
+                let key = next();
+                recipe.vessel=VesselKind::from_key(&key).unwrap_or_else(||{eprintln!("Unknown vessel {key}; choose circle, square, hourglass, cascade or garden.");std::process::exit(2)});
+                i += 1;
+            }
             "--particles" => {
                 recipe.budget = next().parse().unwrap_or(0);
                 i += 1;
@@ -126,7 +163,7 @@ fn main() {
             }
             "--scripted" => options.scripted = true,
             "--help" => {
-                println!("Sand Art (GPU, 100,000 particles by default)\n  --cpu (CPU reference, 3,000 particles)\n  --particles N\n  --smoke-frames N [--scripted] [--screenshot PATH] [--report PATH]\nHeadless benchmark: cargo run --release --bin benchmark -- 3000 600");
+                println!("Sand Art (GPU, 100,000 particles by default)\n  --cpu (CPU reference, 3,000 particles)\n  --particles N\n  --vessel circle|square|hourglass|cascade|garden\n  --smoke-frames N [--scripted] [--screenshot PATH] [--report PATH]\nHeadless benchmark: cargo run --release --bin benchmark -- 3000 600");
                 return;
             }
             unknown => {
@@ -164,6 +201,7 @@ fn main() {
             measurement_start: None,
             measurement_end: None,
             reported: false,
+            selected_vessel: recipe.vessel,
             selected_preset: particles::material::Preset::SandArt,
             pending: recipe.clone(),
             recipe,
@@ -261,6 +299,12 @@ fn smoke_test(
     mut gpu: Option<ResMut<gpu_view::GpuFrame>>,
 ) {
     art.frames += 1;
+    if art.options.smoke_frames.is_some() && art.frames % 60 == 0 {
+        eprintln!(
+            "Smoke progress: frame {}, simulated {:.3}s",
+            art.frames, art.simulation.time
+        );
+    }
     if art.reported {
         return;
     }
@@ -330,7 +374,7 @@ fn smoke_test(
             .get(((samples.len() as f32 * 0.95) as usize).min(samples.len().saturating_sub(1)))
             .copied()
             .unwrap_or(0.0);
-        let report = format!("Windowed smoke: {} frames; {} particles; {} samples\nFrame median {:.3} ms ({:.1} FPS), p95 {:.3} ms\nPhysics median {:.3} ms; simulation {:.3} s; dropped {:.3} s\nFinite/contained: {}\n", art.frames, art.simulation.particles.len(), samples.len(), median,1000.0/median.max(0.001),p95,physics.get(physics.len()/2).copied().unwrap_or(0.0),art.simulation.time,art.clock.dropped_time,art.simulation.particles.iter().all(|p| p.position.is_finite() && p.velocity.is_finite() && p.position.length()+p.radius<=1.001));
+        let report = format!("Windowed smoke: {} frames; {} particles; {} samples\nFrame median {:.3} ms ({:.1} FPS), p95 {:.3} ms\nPhysics median {:.3} ms; simulation {:.3} s; dropped {:.3} s\nFinite/contained: {}\n", art.frames, art.simulation.particles.len(), samples.len(), median,1000.0/median.max(0.001),p95,physics.get(physics.len()/2).copied().unwrap_or(0.0),art.simulation.time,art.clock.dropped_time,art.simulation.particles.iter().all(|p| p.position.is_finite() && p.velocity.is_finite() && art.simulation.vessel.clearance(p.position,art.simulation.angle)+0.001>=p.radius));
         let report = if art.gpu {
             let f = gpu.as_ref().unwrap().feedback.lock().unwrap();
             let start = art.measurement_start.unwrap_or_default();
@@ -392,6 +436,7 @@ mod tests {
             measurement_start: None,
             measurement_end: None,
             reported: false,
+            selected_vessel: recipe.vessel,
             selected_preset: particles::material::Preset::SandArt,
             pending: recipe.clone(),
             recipe,
@@ -447,6 +492,39 @@ mod tests {
         assert_eq!(art.recipe.materials[3].radius, 1.8);
         assert_eq!(art.frames, 0);
         assert!(art.samples.is_empty());
+    }
+    #[test]
+    fn vessel_loading_keeps_live_materials_and_unapplied_draft() {
+        let mut art = fixture();
+        art.pending.set_percentage(3, 100.).unwrap();
+        art.pending.materials[3].radius = 1.8;
+        art.recipe.temperature_c = 90.;
+        art.pending.temperature_c = 90.;
+        art.refresh_materials();
+        art.load_vessel(particles::vessel::VesselKind::Cascade);
+        assert_eq!(art.recipe.vessel, particles::vessel::VesselKind::Cascade);
+        assert_eq!(art.recipe.materials[0].share, 44.);
+        assert_eq!(art.pending.materials[3].share, 100.);
+        assert_eq!(art.pending.materials[3].radius, 1.8);
+        assert_eq!(art.recipe.temperature_c, 90.);
+        art.load_material_preset(particles::material::Preset::PureWater);
+        assert_eq!(art.recipe.vessel, particles::vessel::VesselKind::Cascade);
+        assert_eq!(art.recipe.materials[0].share, 100.);
+    }
+    #[test]
+    fn reroll_changes_layout_but_reset_and_particle_remix_keep_it() {
+        let mut art = fixture();
+        art.recipe.budget = 1200;
+        art.load_vessel(particles::vessel::VesselKind::RockGarden);
+        let original = art.simulation.vessel.map.clone();
+        art.apply(art.recipe.clone());
+        assert_eq!(original, art.simulation.vessel.map);
+        let mut remix = art.recipe.clone();
+        remix.seed += 1;
+        art.apply(remix);
+        assert_eq!(original, art.simulation.vessel.map);
+        art.reroll_layout();
+        assert_ne!(original, art.simulation.vessel.map);
     }
     #[test]
     fn invalid_apply_preserves_running_mixture() {

@@ -6,8 +6,11 @@ struct Material {
 }
 @group(0) @binding(0) var<storage,read> particles:array<Particle>;
 @group(0) @binding(1) var<storage,read> materials:array<Material>;
+@group(0) @binding(2) var boundary_map:texture_2d<f32>;
+@group(0) @binding(4) var boundary_sampler:sampler;
+@group(0) @binding(3) var<uniform> vessel_pose:vec4<f32>;
 struct Vertex {
-    @builtin(position) clip:vec4<f32>, @location(0) local:vec2<f32>, @location(1) color:vec3<f32>, @location(2) @interpolate(flat) id:u32
+    @builtin(position) clip:vec4<f32>, @location(0) local:vec2<f32>, @location(1) color:vec3<f32>, @location(2) @interpolate(flat) id:u32, @location(3) world:vec2<f32>
 }
 fn linear_color(c:vec3<f32>)->vec3<f32>{
     return select(c/12.92,pow((c+0.055)/1.055,vec3<f32>(2.4)),c>vec3<f32>(0.04045));
@@ -28,7 +31,7 @@ fn vertex(v:u32,i:u32,solid:bool)->Vertex{
     if (m.phase==2u)!=solid{
         clip=vec4<f32>(2.0,2.0,0.0,1.0);
     }
-    return Vertex(clip,local,linear_color(m.color.rgb),p.id);
+    return Vertex(clip,local,linear_color(m.color.rgb),p.id,p.position+local*radius);
 }
 @vertex fn vs_fluid(@builtin(vertex_index) v:u32,@builtin(instance_index)i:u32)->Vertex{
     return vertex(v,i,false);
@@ -37,6 +40,7 @@ fn vertex(v:u32,i:u32,solid:bool)->Vertex{
     return vertex(v,i,true);
 }
 @fragment fn fs_fluid(v:Vertex)->@location(0)vec4<f32>{
+    if vessel_pose.z!=0.0&&vessel_sample(v.world,vessel_pose.xy,false).x<0.0{discard;}
     let w=max(1.0-dot(v.local,v.local),0.0);
     if w<=0.0{
         discard;
@@ -44,6 +48,7 @@ fn vertex(v:u32,i:u32,solid:bool)->Vertex{
     return vec4<f32>(v.color*w*w,w*w);
 }
 @fragment fn fs_solid(v:Vertex)->@location(0)vec4<f32>{
+    if vessel_pose.z!=0.0&&vessel_sample(v.world,vessel_pose.xy,false).x<0.0{discard;}
     let r=length(v.local);
     if r>1.0{
         discard;

@@ -4,3 +4,5 @@ pub mod gpu;
 pub mod material;
 pub mod simulation;
 pub mod thermal;
+
+pub mod vessel;

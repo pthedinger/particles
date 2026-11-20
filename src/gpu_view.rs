@@ -80,7 +80,14 @@ fn setup(
 }
 fn publish(mut art: ResMut<Art>, mut frame: ResMut<GpuFrame>) {
     if frame.seed.is_none() || frame.revision != art.revision {
-        frame.seed = Some(Arc::new(Seed::from(&art.simulation)));
+        let mut seed = Seed::from(&art.simulation);
+        let forwarded_angle: f32 = art.gpu_steps.iter().map(|s| s.dt * s.angular_speed).sum();
+        seed.angle = (seed.angle - forwarded_angle).rem_euclid(std::f32::consts::TAU);
+        // Keep exact zero at the reset pose despite f32 summation roundoff.
+        if seed.angle > std::f32::consts::TAU - 0.00001 {
+            seed.angle = 0.;
+        }
+        frame.seed = Some(Arc::new(seed));
         frame.revision = art.revision;
         frame.check = false;
         *frame.feedback.lock().unwrap() = Feedback::default();
@@ -109,7 +116,11 @@ fn run(
     };
     let d = device.wgpu_device();
     if runtime.engine.is_none() || runtime.revision != frame.revision {
-        runtime.engine = Some(Engine::new(d, &queue, seed));
+        if let Some(engine) = runtime.engine.as_mut() {
+            engine.reseed(d, &queue, seed);
+        } else {
+            runtime.engine = Some(Engine::new(d, &queue, seed));
+        }
         runtime.revision = frame.revision;
         runtime.simulated = 0.;
     }
@@ -120,15 +131,12 @@ fn run(
     engine.draw(d, &queue, &image.texture_view);
     let ms = start.elapsed().as_secs_f32() * 1000.;
     if frame.check && !frame.feedback.lock().unwrap().checked {
+        eprintln!("GPU snapshot: reading particle state");
         let out = engine.read_particles(d, &queue);
+        eprintln!("GPU snapshot: received {} particles", out.len());
         // Explicit smoke diagnostics only: identify clustering that can make
         // neighbour work nonlinear even though the index has no overflow.
-        let h = (seed.base_radius * 4.4).max(
-            seed.particles
-                .iter()
-                .map(|p| p.radius * 2.05)
-                .fold(0., f32::max),
-        );
+        let h = engine.grid_cell_size();
         let side = engine.side as usize;
         let mut bins = vec![[0usize; 3]; side * side];
         let bin = |p: &particles::gpu::GpuParticle| {
@@ -217,7 +225,11 @@ fn run(
                 });
         f.finite_contained = out.iter().all(|p| {
             p.position.iter().chain(&p.velocity).all(|v| v.is_finite())
-                && p.position[0].hypot(p.position[1]) + p.radius <= 1.001
+                && seed
+                    .vessel
+                    .clearance(glam::Vec2::from_array(p.position), engine.angle)
+                    + 0.001
+                    >= p.radius
         });
         for p in &out {
             if frame.materials[p.material as usize].phase == 2 {
@@ -234,4 +246,36 @@ fn run(
     let mut f = frame.feedback.lock().unwrap();
     f.simulated = runtime.simulated;
     f.submission_ms = ms;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn reload_publication_uses_pose_before_forwarded_steps_and_keeps_it_when_paused() {
+        let mut art = crate::tests::fixture();
+        art.load_vessel(particles::vessel::VesselKind::Cascade);
+        art.simulation.angle = 0.02;
+        art.gpu_steps = vec![Step {
+            dt: 1. / 120.,
+            angular_speed: 2.4,
+            shake: [0.; 2],
+        }];
+        let mut app = App::new();
+        app.insert_resource(art)
+            .init_resource::<GpuFrame>()
+            .add_systems(Update, publish);
+        app.update();
+        let frame = app.world().resource::<GpuFrame>();
+        assert!(
+            frame.seed.as_ref().unwrap().angle.abs() < 1e-5,
+            "seed already included forwarded angular step"
+        );
+        assert_eq!(frame.steps.len(), 1);
+        app.world_mut().resource_mut::<Art>().paused = true;
+        app.update();
+        let frame = app.world().resource::<GpuFrame>();
+        assert!(frame.steps.is_empty());
+        assert!(frame.seed.as_ref().unwrap().angle.abs() < 1e-5);
+    }
 }

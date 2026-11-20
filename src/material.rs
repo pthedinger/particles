@@ -129,6 +129,8 @@ pub struct Recipe {
     pub budget: usize,
     pub seed: u64,
     pub temperature_c: f32,
+    pub vessel: crate::vessel::VesselKind,
+    pub layout_seed: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preset {
@@ -255,6 +257,8 @@ impl Recipe {
             budget: 3000,
             seed: 42,
             temperature_c: 20.,
+            vessel: crate::vessel::VesselKind::Circle,
+            layout_seed: 17,
         }
     }
     pub fn effective_materials(&self) -> Vec<Material> {

@@ -33,6 +33,7 @@ pub struct Simulation {
     pub base_radius: f32,
     pub angle: f32,
     pub time: f32,
+    pub vessel: std::sync::Arc<crate::vessel::Vessel>,
     previous: Vec<Vec2>,
     inverse_mass: Vec<f32>,
     pressure_inverse_mass: Vec<f32>,
@@ -72,7 +73,9 @@ impl Simulation {
             .zip(&recipe.materials)
             .map(|(n, m)| *n as f32 * m.radius * m.radius)
             .sum();
-        let base_radius = (0.72 / area).sqrt();
+        let vessel = crate::vessel::Vessel::new(recipe.vessel, recipe.layout_seed);
+        let upper_only = recipe.vessel == crate::vessel::VesselKind::Hourglass;
+        let base_radius = (0.72 * vessel.area(upper_only) / std::f32::consts::PI / area).sqrt();
         if recipe
             .materials
             .iter()
@@ -89,7 +92,7 @@ impl Simulation {
         }
         identities.shuffle(&mut rng);
         let offset = rng.gen_range(0.0..std::f32::consts::TAU);
-        let particles = identities
+        let mut particles: Vec<Particle> = identities
             .into_iter()
             .enumerate()
             .map(|(i, material)| {
@@ -103,12 +106,38 @@ impl Simulation {
                 }
             })
             .collect();
+        if recipe.vessel != crate::vessel::VesselKind::Circle {
+            let mut cursor = 0u32;
+            let phase = Vec2::new(rng.gen(), rng.gen());
+            for p in &mut particles {
+                let mut found = false;
+                for _ in 0..100_000 {
+                    cursor += 1;
+                    let q = Vec2::new(
+                        ((phase.x as f64 + cursor as f64 * 0.7548776662466927).fract()) as f32,
+                        ((phase.y as f64 + cursor as f64 * 0.5698402909980532).fract()) as f32,
+                    ) * 2.
+                        - Vec2::ONE;
+                    if (!upper_only || q.y > 0.10 + p.radius)
+                        && vessel.clearance(q, 0.) > p.radius + 0.0001
+                    {
+                        p.position = q;
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    return Err("Particles are too large for this vessel; increase the particle count or reduce size.".into());
+                }
+            }
+        }
         let mut sim = Self {
             particles,
             materials: recipe.effective_materials(),
             base_radius,
             angle: 0.0,
             time: 0.0,
+            vessel,
             previous: Vec::new(),
             inverse_mass: Vec::new(),
             pressure_inverse_mass: Vec::new(),
@@ -202,6 +231,11 @@ impl Simulation {
                                 .position
                                 .distance_squared(self.particles[k].position)
                                 < h2
+                            && self.vessel.segment_clear(
+                                self.particles[i].position,
+                                self.particles[k].position,
+                                self.angle,
+                            )
                         {
                             self.pairs.push((i, k));
                         }
@@ -427,7 +461,7 @@ impl Simulation {
             }
         }
         for p in &mut self.particles {
-            p.position = p.position.clamp_length_max(1.0 - p.radius);
+            p.position = self.vessel.project(p.position, p.radius, self.angle);
         }
     }
 
@@ -469,7 +503,20 @@ impl Simulation {
                 crate::thermal::noise(i as u32, self.thermal_tick) * (m.thermal_motion * dt.sqrt());
             p.velocity += (target - p.velocity) * (1.0 - (-drag * dt).exp());
             p.velocity = p.velocity.clamp_length_max(speed_limit);
-            p.position += p.velocity * dt;
+            let target_position = p.position + p.velocity * dt;
+            let start = p.position;
+            // Sample swept motion at intervals smaller than the narrowest fixed wall.
+            let pieces = (((target_position - start).length()
+                + motion.angular_velocity.abs() * dt * (start.length() + 0.1))
+                / 0.012)
+                .ceil()
+                .max(1.) as u32;
+            for j in 1..=pieces {
+                let next = p.position + (target_position - start) / pieces as f32;
+                let angle =
+                    self.angle - motion.angular_velocity * dt * (1. - j as f32 / pieces as f32);
+                p.position = self.vessel.project(next, p.radius, angle);
+            }
         }
         self.contacts.clear();
         for _ in 0..ITERATIONS {
@@ -478,9 +525,11 @@ impl Simulation {
         for (i, p) in self.particles.iter_mut().enumerate() {
             p.velocity = ((p.position - self.previous[i]) / dt).clamp_length_max(speed_limit);
             let m = &self.materials[p.material];
-            if p.position.length_squared() >= (1.0 - p.radius - 0.0005).powi(2) {
-                let normal = p.position.normalize_or_zero();
-                p.velocity -= normal * p.velocity.dot(normal).max(0.0);
+            let (clearance, normal) = self.vessel.sample(p.position, self.angle);
+            if clearance <= p.radius + 0.0005 {
+                let wall_velocity =
+                    Vec2::new(-p.position.y, p.position.x) * motion.angular_velocity;
+                p.velocity -= normal * (p.velocity - wall_velocity).dot(normal).min(0.0);
                 if m.phase == Phase::Solid {
                     let target = Vec2::new(-p.position.y, p.position.x) * motion.angular_velocity;
                     p.velocity += (target - p.velocity) * (m.friction * 0.25);

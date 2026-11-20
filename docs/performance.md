@@ -133,3 +133,46 @@ The sidebar scrolls at small window sizes. The default layout and rendered vesse
 Raw [windowed report](benchmarks/2026-11-10-material-lab-windowed.txt). The uniform temperature is an external phenomenological bath, with fixed particle phases and geometry; it changes effective density, viscosity, fluid cohesion, gas target concentration and velocity diffusion. It has no heat transport or calibrated thermodynamic conservation law. Extreme user-selected properties can change both physical behaviour and neighbour-search cost.
 
 ![Material lab controls and vessel](screenshots/sand-art-material-lab.png)
+
+
+
+## Ready-made vessels (2026-11-19/20)
+
+Measured on the same Apple M4 Pro/Metal host, release build, **100,000 particles**, default balanced material mixture, 1/120-second steps and six constraint iterations. Window screenshots and explicit GPU readback happen after the measured interval. The table covers different sequences and durations; it is not a controlled cross-vessel microbenchmark. Frame-scripted sequences also follow different trajectories when clock progression differs.
+
+| Vessel / sequence | Measured frames | Median frame / FPS | p95 frame | Simulated / active wall | Ratio | Dropped |
+| :--- | ---: | ---: | ---: | :--- | ---: | ---: |
+| Circle / 900-frame scripted | 750 | 17.689 ms / 56.5 | 42.289 ms | 15.550 / 17.805 s | 0.873 | 2.200 s |
+| Cascade / 900-frame scripted | 750 | 8.368 ms / 119.5 | 17.890 ms | 7.417 / 7.426 s | 0.999 | 0.008 s |
+| Hourglass / 360-frame pouring | 270 | 41.082 ms / 24.3 | 50.836 ms | 8.683 / 10.654 s | 0.815 | 1.925 s |
+| Rock garden / 120-frame settling | 90 | 17.651 ms / 56.7 | 18.379 ms | 1.575 / 1.576 s | 0.999 | 0.000 s |
+
+**Hourglass remains substantially slower at 100k.** This implementation does not claim sustained60FPS or exact wall-clock progression for every shape or material combination. The four-step catch-up cap and lost-time meter remain visible; use the particle-count selector to trade detail for speed. No count, physical speed or constraint iteration reduction was used to obtain these results. CPU submission time is not GPU execution time and can include driver backpressure.
+
+All actual GPU snapshots were finite and contained in their selected vessel, with particle/material identities preserved. Circle had no grains in the upper/open region. Elevated grains on Cascade shelves are intentional, so that circle-specific statistic is not a settling score for Cascade. Circle/Cascade profiles precede the final compact-grid correction; their grid cell size equals physical support, so the corrected coordinate conversion is unchanged on those paths. Hourglass/Garden captures were repeated after the correction. These are host- and workload-specific measurements.
+
+### Boundary representation and cost
+
+Collision and drawing use one immutable512-square distance/normal map, hardware-filtered asRGBA16F on GPU and sampled asf32 by the CPU reference. The encoder uses half2.7.1, already locked transitively, without upgrading any package. The CPU map and GPU texture are retained across Reset/Remix/material Apply when geometry is unchanged.
+
+Neighbour visibility is derived from the same defining geometry. Exact edge/capsule/circle checks handle coarse samples; a conservative short-chord bound skips rounded blockers that cannot be crossed within support. It subtracts distance-map interpolation and half-float errors from the guaranteed free radius. Hourglass uses its exact two neck-plane intersections. The randomized garden outline is a convex hull, with fixed rounded pegs. Fixed geometry is specialized into the shader and current/prior rotation vectors are computed once per step. This avoids repeated texture tracing, dynamic primitive loops and unnecessary cache sampling. It changes neither particle count nor physical interaction radius.
+
+The GPU grid's cell size is bounded independently of physical support to retain the two-level scan for compact recipes. Swept collisions, grid indexing and occupancy diagnostics now use that same cell size.
+
+### Review, lockup investigation and checks
+
+**78 checks pass:**51ordinary CPU/app/geometry tests and27explicitly invoked real-GPU tests. Formatting, all-target compilation and diff whitespace checks pass. Tests cover deterministic free-space seeding/counts,100k distinct positions, geometry reuse, shelf resting, hourglass passage, rotated containment, compact100k maximum reference sizes, coarse/asymmetric/crowded hidden-neighbour coupling, fine neck corners, moving shelves at maximum supported timestep, and actual fluid/grain pixel masking. Existing grain/material/volume checks remain in place.
+
+One independent read-only review found moving-wall crossing, asymmetric barrier filtering/damping normalization, double-counted reload rotation and geometry rebuilds. Each was addressed with regression coverage. A later compact-grid fast-grain test demonstrated a swept-collision indexing error (grains exchanged sides); using the actual cell size made it pass and also corrected the review's diagnostic-bin issue.
+
+A simulation-window stall was reported during an unbounded100k hourglass capture. That process was terminated and confirmed gone. After the compact-grid fix, bounded360-frame runs both without and with screenshot capture completed and exited normally; the original stall was not stack-sampled and has not been reproduced since. This is not a claim of universal hang immunity or a long-duration stress soak. Subsequent diagnostic probes used an external timeout to prevent another indefinitely open run.
+
+Rendered Hourglass/Garden captures and the3000-particle CPU Cascade reference were visually inspected for matching walls, obstacles and fluid masks. The Square and Cascade presets were also captured. Native mouse-event automation, live resizing, assistive technology and subpixel CPU clipping were not exhaustively exercised. The selector wraps at narrow widths; the existing sidebar scrolls. Map sampling approximates corners, and the timer is not calibrated. Drawing/moving individual obstacles remains outside this increment.
+
+Raw reports: [Circle](benchmarks/2026-11-19-vessel-vessel-circle.txt), [Cascade](benchmarks/2026-11-19-vessel-cascade.txt), [Hourglass](benchmarks/2026-11-20-vessel-hourglass.txt), [Garden](benchmarks/2026-11-20-vessel-garden.txt).
+
+![Cascade shelves](screenshots/sand-art-cascade.png)
+
+![Hourglass](screenshots/sand-art-hourglass.png)
+
+![Rock garden](screenshots/sand-art-garden.png)

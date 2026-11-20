@@ -179,63 +179,13 @@ fn gpu_draw_reads_particle_state_and_live_material_colour() {
     s.particles = vec![p(0., 0., 3)];
     s.particles[0].radius = 0.2;
     let e = Engine::new(&d, &q, &s);
-    let texture = d.create_texture(&wgpu::TextureDescriptor {
-        label: None,
-        size: wgpu::Extent3d {
-            width: 64,
-            height: 64,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let pixels = |e: &Engine| {
-        e.draw(&d, &q, &texture.create_view(&Default::default()));
-        let b = d.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: 64 * 256,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut encoder = d.create_command_encoder(&Default::default());
-        encoder.copy_texture_to_buffer(
-            texture.as_image_copy(),
-            wgpu::ImageCopyBuffer {
-                buffer: &b,
-                layout: wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(256),
-                    rows_per_image: None,
-                },
-            },
-            wgpu::Extent3d {
-                width: 64,
-                height: 64,
-                depth_or_array_layers: 1,
-            },
-        );
-        q.submit([encoder.finish()]);
-        let (tx, rx) = std::sync::mpsc::channel();
-        b.slice(..)
-            .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
-        d.poll(wgpu::Maintain::Wait);
-        rx.recv().unwrap().unwrap();
-        let view = b.slice(..).get_mapped_range();
-        let out = view.to_vec();
-        drop(view);
-        b.unmap();
-        out
-    };
-    let before = pixels(&e);
+
+    let before = draw_pixels(&d, &q, &e);
     let center = (32 * 64 + 32) * 4;
     assert!(before[center] > 100, "grain was not drawn from GPU state");
     s.materials[3].color = [0., 0., 1., 1.];
     e.upload_materials(&q, &s.materials);
-    let after = pixels(&e);
+    let after = draw_pixels(&d, &q, &e);
     assert!(
         after[center + 2] > after[center] + 100,
         "live colour did not reach GPU renderer"
@@ -575,4 +525,366 @@ fn gpu_pure_fluid_size_and_temperature_endpoints_stay_finite() {
                 && p.position[0].hypot(p.position[1]) + p.radius <= 1.001
         ));
     }
+}
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_vessel_shelf_stops_a_falling_grain() {
+    let (d, q) = device();
+    let mut r = Recipe::balanced();
+    r.vessel = particles::vessel::VesselKind::Cascade;
+    r.budget = 1200;
+    let mut s = Seed::from(&Simulation::seeded(&r).unwrap());
+    s.base_radius = 0.012;
+    s.particles = vec![p(-0.25, 0.65, 3)];
+    s.particles[0].radius = 0.012;
+    s.particles[0].velocity[1] = -2.;
+    let mut e = Engine::new(&d, &q, &s);
+    e.advance(&d, &q, &vec![Step::default(); 300]);
+    let out = e.read_particles(&d, &q);
+    assert!(
+        out[0].position[1] > 0.43,
+        "grain fell through shelf: {:?}",
+        out[0]
+    );
+    assert!(out[0].velocity[0].hypot(out[0].velocity[1]) < 0.04);
+}
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_hourglass_transfers_grains_through_the_neck() {
+    let (d, q) = device();
+    let mut r = Recipe::balanced();
+    r.vessel = particles::vessel::VesselKind::Hourglass;
+    r.budget = 12000;
+    r.set_percentage(3, 100.).unwrap();
+    let s = Seed::from(&Simulation::seeded(&r).unwrap());
+    let mut e = Engine::new(&d, &q, &s);
+    e.advance(&d, &q, &vec![Step::default(); 600]);
+    let out = e.read_particles(&d, &q);
+    let transferred = out.iter().filter(|p| p.position[1] < -0.12).count();
+    assert!(transferred > 100, "no usable hourglass flow: {transferred}");
+}
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_rotating_vessels_keep_all_materials_out_of_walls() {
+    let (d, q) = device();
+    for kind in particles::vessel::VesselKind::ALL.into_iter().skip(1) {
+        let mut r = Recipe::balanced();
+        r.vessel = kind;
+        r.budget = 12000;
+        let s = Seed::from(&Simulation::seeded(&r).unwrap());
+        let mut e = Engine::new(&d, &q, &s);
+        let steps: Vec<_> = (0..240)
+            .map(|i| Step {
+                dt: 1. / 120.,
+                angular_speed: 1.6,
+                shake: [4. * (i as f32 * 0.4).sin(), 3. * (i as f32 * 0.3).cos()],
+            })
+            .collect();
+        e.advance(&d, &q, &steps);
+        let out = e.read_particles(&d, &q);
+        let min_clearance = out
+            .iter()
+            .map(|p| {
+                s.vessel
+                    .clearance(glam::Vec2::from_array(p.position), e.angle)
+                    - p.radius
+            })
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            min_clearance > -0.0005,
+            "{kind:?} wall penetration {min_clearance}"
+        );
+        assert!(out.iter().enumerate().all(|(i, p)| p.id == i as u32
+            && p.material == s.particles[i].material
+            && p.velocity.iter().all(|v| v.is_finite())));
+        assert!((e.angle - 3.2).abs() < 0.001);
+    }
+}
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_compact_100k_large_reference_radii_fit_grid_and_remain_inside() {
+    let (d, q) = device();
+    let mut r = Recipe::balanced();
+    r.vessel = particles::vessel::VesselKind::Hourglass;
+    r.budget = 100000;
+    r.set_percentage(0, 100.).unwrap();
+    for m in &mut r.materials {
+        m.radius = 2.;
+    }
+    let s = Seed::from(&Simulation::seeded(&r).unwrap());
+    let mut e = Engine::new(&d, &q, &s);
+    assert!(e.side <= 360);
+    e.advance(&d, &q, &vec![Step::default(); 30]);
+    let out = e.read_particles(&d, &q);
+    assert_eq!(out.len(), 100000);
+    assert!(out.iter().enumerate().all(|(i, p)| p.id == i as u32
+        && s.vessel
+            .clearance(glam::Vec2::from_array(p.position), e.angle)
+            + 0.0005
+            >= p.radius));
+}
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_fluid_viscosity_does_not_act_through_a_shelf() {
+    let (d, q) = device();
+    let mut r = Recipe::balanced();
+    r.vessel = particles::vessel::VesselKind::Cascade;
+    r.budget = 1200;
+    let mut s = Seed::from(&Simulation::seeded(&r).unwrap());
+    s.base_radius = 0.04;
+    s.particles = vec![p(-0.25, 0.33, 0)];
+    s.particles[0].radius = 0.004;
+    s.particles[0].velocity = [0.1, 0.];
+    s.materials[0].viscosity = 8.;
+    s.materials[0].thermal_motion = 0.;
+    s.materials[0].surface_tension = 0.;
+    let mut single = Engine::new(&d, &q, &s);
+    single.advance(&d, &q, &[Step::default()]);
+    let baseline = single.read_particles(&d, &q)[0];
+    let mut other = p(-0.25, 0.43, 0);
+    other.radius = 0.004;
+    other.velocity = [-0.1, 0.];
+    s.particles.push(other);
+    let mut pair = Engine::new(&d, &q, &s);
+    pair.advance(&d, &q, &[Step::default()]);
+    let actual = pair.read_particles(&d, &q)[0];
+    assert!(
+        (actual.velocity[0] - baseline.velocity[0]).abs() < 1e-5,
+        "viscosity leaked through wall: {actual:?} vs {baseline:?}"
+    );
+}
+
+fn draw_pixels(d: &wgpu::Device, q: &wgpu::Queue, e: &Engine) -> Vec<u8> {
+    let texture = d.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: 64,
+            height: 64,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    e.draw(&d, &q, &texture.create_view(&Default::default()));
+    let b = d.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 64 * 256,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = d.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::ImageCopyBuffer {
+            buffer: &b,
+            layout: wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(256),
+                rows_per_image: None,
+            },
+        },
+        wgpu::Extent3d {
+            width: 64,
+            height: 64,
+            depth_or_array_layers: 1,
+        },
+    );
+    q.submit([encoder.finish()]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    b.slice(..)
+        .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+    d.poll(wgpu::Maintain::Wait);
+    rx.recv().unwrap().unwrap();
+    let view = b.slice(..).get_mapped_range();
+    let out = view.to_vec();
+    drop(view);
+    b.unmap();
+    out
+}
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_vessel_render_masks_fluid_and_grains_at_rotated_walls() {
+    let (d, q) = device();
+    let mut r = Recipe::balanced();
+    r.vessel = particles::vessel::VesselKind::Cascade;
+    r.budget = 1200;
+    for angle in [0., 0.7] {
+        for material in [0, 3] {
+            let mut s = Seed::from(&Simulation::seeded(&r).unwrap());
+            s.angle = angle;
+            let world = glam::Vec2::from_angle(angle).rotate(glam::Vec2::new(-0.25, 0.38));
+            s.particles = vec![p(world.x, world.y, material)];
+            s.particles[0].radius = 0.06;
+            s.materials[material as usize].color = [0., 0., 1., 1.];
+            let e = Engine::new(&d, &q, &s);
+            let pixels = draw_pixels(&d, &q, &e);
+            let x = ((world.x + 1.) * 32.) as usize;
+            let y = ((1. - world.y) * 32.) as usize;
+            let at = (y * 64 + x) * 4;
+            assert!(
+                pixels[at + 2] < 110,
+                "blue material painted inside rotated shelf: {:?}",
+                &pixels[at..at + 4]
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_rotating_shelf_does_not_sweep_a_fast_grain_through() {
+    let (d, q) = device();
+    let mut r = Recipe::balanced();
+    r.vessel = particles::vessel::VesselKind::Cascade;
+    r.budget = 1200;
+    let mut s = Seed::from(&Simulation::seeded(&r).unwrap());
+    s.base_radius = 0.012;
+    s.particles = vec![p(-0.58, 0.429, 3)];
+    s.particles[0].radius = 0.003;
+    s.particles[0].velocity = [0., -2.5];
+    s.materials[3].friction = 0.;
+    let mut e = Engine::new(&d, &q, &s);
+    e.advance(
+        &d,
+        &q,
+        &[Step {
+            dt: 1. / 60.,
+            angular_speed: -3.,
+            shake: [0.; 2],
+        }],
+    );
+    let out = e.read_particles(&d, &q);
+    let local = glam::Vec2::from_angle(-e.angle).rotate(glam::Vec2::from_array(out[0].position));
+    assert!(local.y > 0.425, "rotating shelf crossed grain: {local}");
+}
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_asymmetric_and_crowded_hidden_neighbours_do_not_couple_through_shelf() {
+    let (d, q) = device();
+    let mut r = Recipe::balanced();
+    r.vessel = particles::vessel::VesselKind::Cascade;
+    r.budget = 1200;
+    let mut s = Seed::from(&Simulation::seeded(&r).unwrap());
+    s.base_radius = 0.09;
+    s.materials[0].viscosity = 8.;
+    s.materials[0].thermal_motion = 0.;
+    s.materials[0].surface_tension = 0.;
+    s.particles = vec![p(-0.25, 0.30, 0)];
+    s.particles[0].radius = 0.004;
+    s.particles[0].velocity = [0.1, 0.];
+    let run = |s: &Seed| {
+        let mut e = Engine::new(&d, &q, s);
+        e.advance(&d, &q, &[Step::default()]);
+        e.read_particles(&d, &q)
+    };
+    let baseline = run(&s)[0];
+    let mut other = p(-0.25, 0.56, 0);
+    other.radius = 0.004;
+    other.velocity = [-0.1, 0.];
+    s.particles.push(other);
+    let actual = run(&s)[0];
+    assert!(
+        (actual.velocity[0] - baseline.velocity[0]).abs() < 1e-5,
+        "asymmetric barrier bypass: {actual:?} vs {baseline:?}"
+    );
+    s.particles[1] = p(-0.24, 0.30, 0);
+    s.particles[1].radius = 0.004;
+    s.particles[1].velocity = [-0.1, 0.];
+    let visible = run(&s)[0];
+    for i in 0..40 {
+        let mut hidden = p(-0.45 + i as f32 * 0.01, 0.56, 0);
+        hidden.radius = 0.004;
+        s.particles.push(hidden);
+    }
+    let crowded = run(&s)[0];
+    assert!(
+        (crowded.velocity[0] - visible.velocity[0]).abs() < 1e-5,
+        "hidden group changed visible damping: {crowded:?} vs {visible:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_reseed_reuses_geometry_and_replaces_particle_state() {
+    let (d, q) = device();
+    let mut r = Recipe::balanced();
+    r.vessel = particles::vessel::VesselKind::Cascade;
+    r.budget = 1200;
+    let mut s = Seed::from(&Simulation::seeded(&r).unwrap());
+    let mut e = Engine::new(&d, &q, &s);
+    r.seed += 1;
+    s = Seed::from(&Simulation::seeded(&r).unwrap());
+    assert!(e.reseed(&d, &q, &s));
+    let out = e.read_particles(&d, &q);
+    assert_eq!(out[0].position, s.particles[0].position);
+    r.vessel = particles::vessel::VesselKind::RockGarden;
+    s = Seed::from(&Simulation::seeded(&r).unwrap());
+    assert!(!e.reseed(&d, &q, &s));
+    e.advance(&d, &q, &[Step::default()]);
+    let out = e.read_particles(&d, &q);
+    assert!(out.iter().all(|p| s
+        .vessel
+        .clearance(glam::Vec2::from_array(p.position), e.angle)
+        + 0.0005
+        >= p.radius));
+}
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_fine_hourglass_neck_keeps_concave_corner_visibility() {
+    let (d, q) = device();
+    let mut r = Recipe::balanced();
+    r.vessel = particles::vessel::VesselKind::Hourglass;
+    r.budget = 1200;
+    let mut s = Seed::from(&Simulation::seeded(&r).unwrap());
+    s.base_radius = 0.0015;
+    s.materials[0].viscosity = 8.;
+    s.materials[0].thermal_motion = 0.;
+    s.materials[0].surface_tension = 0.;
+    s.particles = vec![p(0.05925, 0.0775, 0)];
+    s.particles[0].radius = 0.0005;
+    s.particles[0].velocity = [-0.1, 0.];
+    let run = |s: &Seed| {
+        let mut e = Engine::new(&d, &q, s);
+        e.advance(&d, &q, &[Step::default()]);
+        e.read_particles(&d, &q)[0]
+    };
+    let baseline = run(&s);
+    let mut other = p(0.06165, 0.0825, 0);
+    other.radius = 0.0005;
+    other.velocity = [0.1, 0.];
+    s.particles.push(other);
+    let actual = run(&s);
+    assert!(
+        (actual.velocity[0] - baseline.velocity[0]).abs() < 1e-5,
+        "fine corner leaked viscosity: {actual:?}/{baseline:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_compact_grid_fast_grains_do_not_pass_through_each_other() {
+    let (d, q) = device();
+    let mut s = seed();
+    s.base_radius = 0.0005;
+    s.particles = vec![p(-0.002, 0., 3), p(0.002, 0., 3)];
+    for p in &mut s.particles {
+        p.radius = 0.0005;
+    }
+    s.particles[0].velocity = [0.6, 0.];
+    s.particles[1].velocity = [-0.6, 0.];
+    let mut e = Engine::new(&d, &q, &s);
+    e.advance(&d, &q, &[Step::default()]);
+    let out = e.read_particles(&d, &q);
+    assert!(
+        out[0].position[0] < out[1].position[0],
+        "compact-grid collision missed: {out:?}"
+    );
 }
