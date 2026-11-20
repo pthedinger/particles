@@ -3,12 +3,12 @@ mod view;
 use bevy::{
     app::AppExit,
     prelude::*,
-    render::view::screenshot::ScreenshotManager,
+    render::{renderer::RenderDevice, view::screenshot::ScreenshotManager},
     window::{PresentMode, PrimaryWindow},
 };
 use bevy_inspector_egui::bevy_egui::EguiPlugin;
 use particles::{
-    controls::{bounded_motion, rotation_step, Clock, FIXED_DT},
+    controls::{bounded_motion, rotation_step, Clock, FrameBudget, PhysicsBudget, FIXED_DT},
     material::Recipe,
     simulation::Simulation,
     vessel::VesselKind,
@@ -22,12 +22,16 @@ pub struct Art {
     pub revision: u64,
     pub gpu_texture: Option<bevy_inspector_egui::egui::TextureId>,
     pub gpu_steps: Vec<particles::gpu::Step>,
+    pub adaptive: bool,
+    pub physics_budget: PhysicsBudget,
+    pub frame_budget: FrameBudget,
     pub active_wall: f32,
     pub measurement_start: Option<(f32, f32, f32)>,
     pub measurement_end: Option<(f32, f32, f32)>,
     pub reported: bool,
     pub recipe: Recipe,
     pub pending: Recipe,
+    pub pending_neck_width_percent: u16,
     pub selected_vessel: VesselKind,
     pub selected_preset: particles::material::Preset,
     pub clock: Clock,
@@ -60,21 +64,29 @@ pub struct Options {
 
 impl Art {
     pub fn load_vessel(&mut self, kind: VesselKind) {
-        self.apply_vessel(kind, self.recipe.layout_seed);
+        self.apply_vessel(|next| next.vessel = kind);
     }
     pub fn reroll_layout(&mut self) {
-        self.apply_vessel(self.recipe.vessel, self.recipe.layout_seed.wrapping_add(1));
+        self.apply_vessel(|next| next.layout_seed = next.layout_seed.wrapping_add(1));
     }
-    fn apply_vessel(&mut self, kind: VesselKind, layout_seed: u64) {
+    pub fn apply_hourglass_neck_width(&mut self) {
+        let width = self.pending_neck_width_percent;
+        if self.recipe.vessel == VesselKind::Hourglass && width != self.recipe.neck_width_percent {
+            let selection = self.selected_vessel;
+            self.apply_vessel(|next| next.neck_width_percent = width);
+            self.selected_vessel = selection;
+        }
+    }
+    fn apply_vessel(&mut self, update: impl FnOnce(&mut Recipe)) {
         let mut draft = self.pending.clone();
         let revision = self.revision;
         let mut next = self.recipe.clone();
-        next.vessel = kind;
-        next.layout_seed = layout_seed;
+        update(&mut next);
         self.apply(next);
         if self.revision != revision {
-            draft.vessel = kind;
-            draft.layout_seed = layout_seed;
+            draft.vessel = self.recipe.vessel;
+            draft.layout_seed = self.recipe.layout_seed;
+            draft.neck_width_percent = self.recipe.neck_width_percent;
             self.pending = draft;
         }
     }
@@ -82,6 +94,7 @@ impl Art {
         let mut next = preset.recipe();
         next.vessel = self.recipe.vessel;
         next.layout_seed = self.recipe.layout_seed;
+        next.neck_width_percent = self.recipe.neck_width_percent;
         next.budget = self.pending.budget;
         next.seed = self.recipe.seed;
         next.temperature_c = self.recipe.temperature_c;
@@ -112,10 +125,14 @@ impl Art {
                 self.reported = false;
                 self.options.screenshot_result = Default::default();
                 self.selected_vessel = recipe.vessel;
+                if self.recipe.neck_width_percent != recipe.neck_width_percent {
+                    self.pending_neck_width_percent = recipe.neck_width_percent;
+                }
                 self.recipe = recipe.clone();
                 self.pending = recipe;
                 self.field.invalidate();
                 self.clock = Clock::default();
+                self.frame_budget = FrameBudget::default();
                 self.angular_speed = 0.0;
                 self.turn_remaining = 0.0;
                 self.shake_remaining = 0.0;
@@ -132,6 +149,7 @@ fn main() {
     let mut recipe = Recipe::balanced();
     let mut options = Options::default();
     let gpu = !args.iter().any(|s| s == "--cpu");
+    let adaptive = gpu && !args.iter().any(|s| s == "--full-quality");
     if gpu {
         recipe.budget = 100_000;
     }
@@ -139,7 +157,7 @@ fn main() {
     while i < args.len() {
         let next = || args.get(i + 1).cloned().unwrap_or_default();
         match args[i].as_str() {
-            "--cpu" => {}
+            "--cpu" | "--full-quality" => {}
             "--vessel" => {
                 let key = next();
                 recipe.vessel=VesselKind::from_key(&key).unwrap_or_else(||{eprintln!("Unknown vessel {key}; choose circle, square, hourglass, cascade or garden.");std::process::exit(2)});
@@ -163,7 +181,7 @@ fn main() {
             }
             "--scripted" => options.scripted = true,
             "--help" => {
-                println!("Sand Art (GPU, 100,000 particles by default)\n  --cpu (CPU reference, 3,000 particles)\n  --particles N\n  --vessel circle|square|hourglass|cascade|garden\n  --smoke-frames N [--scripted] [--screenshot PATH] [--report PATH]\nHeadless benchmark: cargo run --release --bin benchmark -- 3000 600");
+                println!("Sand Art (GPU, 100,000 particles by default)\n  --cpu (CPU reference, 3,000 particles)\n  --particles N\n  --full-quality (disable adaptive GPU physics)\n  --vessel circle|square|hourglass|cascade|garden\n  --smoke-frames N [--scripted] [--screenshot PATH] [--report PATH]\nHeadless benchmark: cargo run --release --bin benchmark -- 3000 600");
                 return;
             }
             unknown => {
@@ -197,12 +215,16 @@ fn main() {
             revision: 1,
             gpu_texture: None,
             gpu_steps: Vec::new(),
+            adaptive,
+            physics_budget: PhysicsBudget::FULL,
+            frame_budget: FrameBudget::default(),
             active_wall: 0.,
             measurement_start: None,
             measurement_end: None,
             reported: false,
             selected_vessel: recipe.vessel,
             selected_preset: particles::material::Preset::SandArt,
+            pending_neck_width_percent: recipe.neck_width_percent,
             pending: recipe.clone(),
             recipe,
             clock: Clock::default(),
@@ -248,14 +270,52 @@ fn main() {
     app.run();
 }
 
-fn simulate(time: Res<Time<Real>>, mut art: ResMut<Art>) {
+fn simulate(
+    time: Res<Time<Real>>,
+    mut art: ResMut<Art>,
+    frame: Option<Res<gpu_view::GpuFrame>>,
+    device: Option<Res<RenderDevice>>,
+) {
     let state = &mut *art;
     let elapsed = time.delta_seconds();
     state.frame_ms += (elapsed * 1000.0 - state.frame_ms) * 0.08;
     if !state.paused {
         state.active_wall += elapsed;
     }
-    let steps = state.clock.advance(elapsed, state.paused);
+    let mut budget = PhysicsBudget::FULL;
+    if let Some(frame) = &frame {
+        if !frame.ready() {
+            // Initialize the texture before accepting physics work.
+            budget.max_steps = 0;
+        } else if state.adaptive && !state.paused {
+            if frame.busy() {
+                if let Some(device) = &device {
+                    device.wgpu_device().poll(wgpu::Maintain::Poll);
+                }
+            }
+            let heavy_motion = state.simulation.particles.len() >= 50_000
+                && (state.turn_remaining > 0.0
+                    || state.angular_speed.abs() > 0.1
+                    || state.desired_speed.abs() > 0.1
+                    || state.shake_remaining > 0.0);
+            budget = state
+                .frame_budget
+                .update(elapsed, heavy_motion, frame.busy());
+        }
+    }
+    state.physics_budget = budget;
+    let steps = if (state.gpu && state.adaptive) || budget.max_steps == 0 {
+        state
+            .clock
+            .advance_with_budget(elapsed, state.paused, budget.max_steps)
+    } else {
+        state.clock.advance(elapsed, state.paused)
+    };
+    if steps > 0 {
+        if let Some(frame) = &frame {
+            frame.reserve_batch();
+        }
+    }
     let start = Instant::now();
     for _ in 0..steps {
         (state.angular_speed, state.turn_remaining) = rotation_step(
@@ -432,12 +492,16 @@ mod tests {
             revision: 1,
             gpu_texture: None,
             gpu_steps: Vec::new(),
+            adaptive: false,
+            physics_budget: PhysicsBudget::FULL,
+            frame_budget: FrameBudget::default(),
             active_wall: 0.,
             measurement_start: None,
             measurement_end: None,
             reported: false,
             selected_vessel: recipe.vessel,
             selected_preset: particles::material::Preset::SandArt,
+            pending_neck_width_percent: recipe.neck_width_percent,
             pending: recipe.clone(),
             recipe,
             clock: Clock::default(),
@@ -511,6 +575,71 @@ mod tests {
         assert_eq!(art.recipe.vessel, particles::vessel::VesselKind::Cascade);
         assert_eq!(art.recipe.materials[0].share, 100.);
     }
+    #[test]
+    fn applying_hourglass_neck_keeps_live_mixture_and_material_draft() {
+        let mut art = fixture();
+        art.load_vessel(VesselKind::Hourglass);
+        let initial_vessel = art.simulation.vessel.clone();
+        let initial_revision = art.revision;
+        let seed = art.recipe.seed;
+        let layout_seed = art.recipe.layout_seed;
+        art.recipe.temperature_c = 90.;
+        art.pending.temperature_c = 90.;
+        art.pending.budget = 120;
+        art.pending.set_percentage(3, 100.).unwrap();
+
+        art.pending_neck_width_percent = 5;
+        assert_eq!(art.revision, initial_revision);
+        assert_eq!(art.recipe.neck_width_percent, 100);
+        art.apply_hourglass_neck_width();
+        assert_eq!(art.revision, initial_revision + 1);
+        assert_eq!(art.recipe.neck_width_percent, 5);
+        assert_eq!(art.pending.neck_width_percent, 5);
+        assert_eq!(art.recipe.seed, seed);
+        assert_eq!(art.recipe.layout_seed, layout_seed);
+        assert_eq!(art.recipe.temperature_c, 90.);
+        assert_eq!(art.recipe.budget, 80);
+        assert_eq!(art.recipe.materials[0].share, 44.);
+        assert_eq!(art.pending.budget, 120);
+        assert_eq!(art.pending.materials[3].share, 100.);
+        let narrow_vessel = art.simulation.vessel.clone();
+        assert!(!std::sync::Arc::ptr_eq(&initial_vessel, &narrow_vessel));
+
+        art.apply_hourglass_neck_width();
+        assert_eq!(art.revision, initial_revision + 1);
+        art.apply(art.recipe.clone());
+        assert!(std::sync::Arc::ptr_eq(
+            &art.simulation.vessel,
+            &narrow_vessel
+        ));
+        art.load_material_preset(particles::material::Preset::PureWater);
+        assert_eq!(art.recipe.neck_width_percent, 5);
+        assert!(std::sync::Arc::ptr_eq(
+            &art.simulation.vessel,
+            &narrow_vessel
+        ));
+        art.load_vessel(VesselKind::Circle);
+        art.load_vessel(VesselKind::Hourglass);
+        assert!(std::sync::Arc::ptr_eq(
+            &art.simulation.vessel,
+            &narrow_vessel
+        ));
+    }
+
+    #[test]
+    fn a_neck_width_outside_the_slider_range_preserves_the_running_hourglass() {
+        let mut art = fixture();
+        art.load_vessel(VesselKind::Hourglass);
+        let revision = art.revision;
+        for invalid in [4, 251] {
+            art.pending_neck_width_percent = invalid;
+            art.apply_hourglass_neck_width();
+            assert!(art.error.is_some());
+            assert_eq!(art.revision, revision);
+            assert_eq!(art.recipe.neck_width_percent, 100);
+        }
+    }
+
     #[test]
     fn reroll_changes_layout_but_reset_and_particle_remix_keep_it() {
         let mut art = fixture();

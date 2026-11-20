@@ -21,8 +21,10 @@ cargo run --release --bin particles -- --cpu
 
 - Drag the rim to rotate the glass continuously. Hold **Left** or **Right** buttons or the arrow keys for steady rotation.
 - **Half-turn** / **F** requests a smooth half-turn; the white marker shows the frame's orientation.
+- In **Hourglass**, set **Neck width** from 5% to 250% of the original opening and click **Apply width**. Applying a new width rebuilds the vessel and restarts particle placement from the current recipe and seed.
 - Hold **Shake** or **S** to agitate the vessel.
 - **Pause / Resume** or **Space** freezes and resumes physical time, including frame motion.
+- **Adaptive 60 FPS** is on by default in GPU mode. It reduces solver passes and may slow simulated time to keep the window responsive. Uncheck it or launch with `--full-quality` to always use six solver passes.
 - **Reset** or **R** reproduces the current recipe and seed. **Remix** changes the seed.
 - Set each material to **0–100%** with the slider or numeric percentage; **Solo** selects a pure material. **Apply mixture** rebuilds the vessel with the edited percentages, phase, size and particle count.
 - Choose **Sand art**, **Dry grains**, **Liquids + bubbles**, **Viscous slurry**, **Float + sink** or **Pure water**, then **Load** to start that experiment immediately. Loading preserves particle count, seed and temperature.
@@ -73,7 +75,7 @@ The GPU solver uses WGSL compute shaders, read-only input snapshots and a separa
 
 Liquid/gas splats accumulate into a 1024-square GPU texture; grains use instanced quads with circular shading. egui samples the vessel texture directly. No CPU mesh or per-particle Bevy entities are created, and ordinary frames do not read particle state back to the CPU. The CPU reference renderer retains its soft field and batched grain mesh.
 
-The frame meter shows displayed frame time and CPU command-submission time in GPU mode. Submission time is **not GPU execution time**. At most four 1/120-second steps run per displayed frame; the clock reports lost time if it cannot keep up. Startup/shader compilation stalls can contribute to this cumulative value. Resizing preserves the circular vessel and pointer coordinates; the desktop window has a minimum size to keep controls usable.
+The frame meter shows displayed frame time and CPU command-submission time in GPU mode. Submission time is **not GPU execution time**. Physics advances in 1/120-second steps. Adaptive mode schedules at most two per frame and reuses the previous vessel image when the GPU queue is busy. Full-quality and CPU modes allow up to four steps for catch-up. The lost-time meter reports when simulation falls behind wall time. Startup and shader compilation may contribute to this value. Frame rates depend on the display, GPU and workload. Resizing preserves the circular vessel and pointer coordinates.
 
 ## Verification and performance
 

@@ -20,7 +20,7 @@ pub struct GpuParticle {
     pub padding: u32,
 }
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct GpuMaterial {
     pub color: [f32; 4],
     pub density: f32,

@@ -73,7 +73,11 @@ impl Simulation {
             .zip(&recipe.materials)
             .map(|(n, m)| *n as f32 * m.radius * m.radius)
             .sum();
-        let vessel = crate::vessel::Vessel::new(recipe.vessel, recipe.layout_seed);
+        let vessel = crate::vessel::Vessel::with_neck_width(
+            recipe.vessel,
+            recipe.layout_seed,
+            recipe.neck_width_percent,
+        );
         let upper_only = recipe.vessel == crate::vessel::VesselKind::Hourglass;
         let base_radius = (0.72 * vessel.area(upper_only) / std::f32::consts::PI / area).sqrt();
         if recipe

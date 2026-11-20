@@ -1,5 +1,5 @@
 use glam::Vec2;
-use particles::controls::{bounded_motion, view_to_world, Clock};
+use particles::controls::{bounded_motion, view_to_world, Clock, FIXED_DT};
 
 #[test]
 fn clock_advances_at_wall_time_and_reports_capped_catchup() {
@@ -41,7 +41,7 @@ fn invalid_and_extreme_input_remains_bounded() {
 
 #[test]
 fn half_turn_brakes_at_exact_target_even_when_initially_moving() {
-    use particles::controls::{rotation_step, FIXED_DT};
+    use particles::controls::rotation_step;
     for initial in [0.0, 1.6, -1.6] {
         let mut speed = initial;
         let mut remaining = std::f32::consts::PI;
@@ -60,4 +60,41 @@ fn half_turn_brakes_at_exact_target_even_when_initially_moving() {
             angle.to_degrees()
         );
     }
+}
+
+#[test]
+fn adaptive_budget_prioritizes_turns_then_recovers_after_sustained_headroom() {
+    use particles::controls::FrameBudget;
+
+    let mut budget = FrameBudget::default();
+    assert_eq!(budget.update(1.0 / 60.0, false, false).iterations, 6);
+    let turn = budget.update(1.0 / 60.0, true, false);
+    assert_eq!(turn.iterations, 4);
+    assert_eq!(turn.max_steps, 2);
+    budget.update(0.034, true, true);
+    let missed = budget.update(0.034, true, true);
+    assert_eq!(missed.iterations, 4);
+    assert_eq!(missed.max_steps, 0);
+    let next = budget.update(1.0 / 60.0, true, false);
+    assert_eq!(next.max_steps, 1);
+    for _ in 0..30 {
+        assert_eq!(budget.update(1.0 / 60.0, false, false).max_steps, 1);
+    }
+    for _ in 0..650 {
+        budget.update(1.0 / 60.0, false, false);
+    }
+    assert_eq!(budget.update(1.0 / 60.0, false, false).iterations, 6);
+    for _ in 0..120 {
+        budget.update(0.020, false, false);
+    }
+    assert_eq!(budget.update(0.020, false, false).max_steps, 1);
+}
+
+#[test]
+fn a_busy_adaptive_frame_cannot_build_up_catch_up_work() {
+    let mut clock = Clock::default();
+    assert_eq!(clock.advance_with_budget(0.5, false, 0), 0);
+    assert!((clock.dropped_time - 0.5).abs() < 1e-5);
+    assert_eq!(clock.advance_with_budget(FIXED_DT, false, 1), 1);
+    assert_eq!(clock.advance_with_budget(0.0, false, 1), 0);
 }

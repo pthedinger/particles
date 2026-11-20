@@ -158,3 +158,53 @@ fn asymmetric_segment_cannot_cut_through_a_shelf() {
     assert!(!v.segment_clear(Vec2::new(-0.25, 0.30), Vec2::new(-0.25, 0.56), 0.));
     assert!(v.segment_clear(Vec2::new(-0.25, 0.30), Vec2::new(-0.15, 0.30), 0.));
 }
+
+#[test]
+fn adjustable_hourglass_neck_drives_clearance_visibility_and_cache() {
+    let narrow = Vessel::with_neck_width(VesselKind::Hourglass, 17, 50);
+    let normal = Vessel::with_neck_width(VesselKind::Hourglass, 17, 100);
+    let wide = Vessel::with_neck_width(VesselKind::Hourglass, 17, 250);
+    let legacy = Vessel::new(VesselKind::Hourglass, 1);
+    assert!(std::sync::Arc::ptr_eq(&normal, &legacy));
+    assert_eq!(normal.barriers[3][..4], [0.06, 0.08, 0.06, -0.08]);
+    assert!(std::sync::Arc::ptr_eq(
+        &wide,
+        &Vessel::with_neck_width(VesselKind::Hourglass, 99, 250)
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &Vessel::new(VesselKind::RockGarden, 17),
+        &Vessel::with_neck_width(VesselKind::RockGarden, 17, 250)
+    ));
+
+    let angle = 0.4;
+    let rotate = |p| Vec2::from_angle(angle).rotate(p);
+    let a = rotate(Vec2::new(0.10, 0.20));
+    let b = rotate(Vec2::new(0.10, -0.20));
+    for (vessel, half_width, clear) in [
+        (&narrow, 0.03, false),
+        (&normal, 0.06, false),
+        (&wide, 0.15, true),
+    ] {
+        assert!((vessel.clearance(Vec2::ZERO, angle) - half_width).abs() < 0.003);
+        assert!(vessel.clearance(a, angle) > 0.);
+        assert!(vessel.clearance(b, angle) > 0.);
+        assert_eq!(vessel.segment_clear(a, b, angle), clear);
+        let p = rotate(Vec2::new(0.10, 0.));
+        let projected = vessel.project(p, 0.01, angle);
+        assert_eq!(projected == p, clear);
+        assert!(vessel.clearance(projected, angle) >= 0.01);
+    }
+}
+
+#[test]
+fn five_percent_hourglass_resolves_the_centerline_clearance() {
+    let vessel = Vessel::with_neck_width(VesselKind::Hourglass, 17, 5);
+    let angle = 0.4;
+    let point = |x, y| Vec2::from_angle(angle).rotate(Vec2::new(x, y));
+
+    assert!((vessel.clearance(Vec2::ZERO, angle) - 0.003).abs() < 0.0001);
+    assert!(vessel.clearance(point(0.002, 0.), angle) > 0.);
+    assert!(vessel.clearance(point(0.004, 0.), angle) < 0.);
+    assert!(vessel.segment_clear(point(0.002, 0.1), point(0.002, -0.1), angle));
+    assert!(!vessel.segment_clear(point(0.01, 0.1), point(0.01, -0.1), angle));
+}

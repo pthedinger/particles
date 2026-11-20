@@ -147,7 +147,7 @@ Measured on the same Apple M4 Pro/Metal host, release build, **100,000 particles
 | Hourglass / 360-frame pouring | 270 | 41.082 ms / 24.3 | 50.836 ms | 8.683 / 10.654 s | 0.815 | 1.925 s |
 | Rock garden / 120-frame settling | 90 | 17.651 ms / 56.7 | 18.379 ms | 1.575 / 1.576 s | 0.999 | 0.000 s |
 
-**Hourglass remains substantially slower at 100k.** This implementation does not claim sustained60FPS or exact wall-clock progression for every shape or material combination. The four-step catch-up cap and lost-time meter remain visible; use the particle-count selector to trade detail for speed. No count, physical speed or constraint iteration reduction was used to obtain these results. CPU submission time is not GPU execution time and can include driver backpressure.
+**Hourglass was substantially slower at 100k in these runs.** See the follow-up measurements below. This implementation does not claim sustained60FPS or exact wall-clock progression for every shape or material combination. The four-step catch-up cap and lost-time meter remain visible; use the particle-count selector to trade detail for speed. No count, physical speed or constraint iteration reduction was used to obtain these results. CPU submission time is not GPU execution time and can include driver backpressure.
 
 All actual GPU snapshots were finite and contained in their selected vessel, with particle/material identities preserved. Circle had no grains in the upper/open region. Elevated grains on Cascade shelves are intentional, so that circle-specific statistic is not a settling score for Cascade. Circle/Cascade profiles precede the final compact-grid correction; their grid cell size equals physical support, so the corrected coordinate conversion is unchanged on those paths. Hourglass/Garden captures were repeated after the correction. These are host- and workload-specific measurements.
 
@@ -176,3 +176,25 @@ Raw reports: [Circle](benchmarks/2026-11-19-vessel-vessel-circle.txt), [Cascade]
 ![Hourglass](screenshots/sand-art-hourglass.png)
 
 ![Rock garden](screenshots/sand-art-garden.png)
+
+
+## Hourglass solver tuning (2026-11-20)
+
+GPU timestamps identified repeated density and position correction as the largest cost in the dense 100,000-particle hourglass. The solver now visits only cells that overlap each particle's search bounds, checks for neck crossings only near the neck, and reuses particle quantities across its inner loops. Replaying the same dense snapshot gave 9.97 ms before and 7.75 ms after tuning per physics step, measured as the sum of GPU pass times. The solver still uses 100,000 particles and six constraint iterations at a fixed 1/120-second step.
+
+In the windowed pouring run, the median improved from the previously recorded 24.3 FPS to 60.0 FPS over 270 measured frames, with a 17.1 ms 95th-percentile frame time. In a longer repeat, the median was 59.9 FPS over 600 measured frames, with a 33.7 ms 95th-percentile frame time and 10.68 simulated seconds over 10.90 seconds of wall time. Both tuned runs preserved particle count, identities and containment. These are measurements from the local Apple M4 Pro, and frame rates vary with the mixture and motion.
+
+All 51 ordinary and 27 GPU tests passed. The short windowed run exited normally. The long run completed its measurement and wrote its report, after which the watchdog stopped the test window. The sampled stack showed Bevy waiting for its render thread during shutdown.
+
+## Adaptive 60 FPS
+
+GPU mode reduces solver passes from six to four during high-count turns and shaking. It limits physics to two steps per displayed frame and reduces that budget further when frames run long. While the GPU queue is backed up, the window can reuse the previous vessel image. The solver retains a 1/120-second timestep. Disabling adaptive mode uses six passes and allows up to four steps per frame.
+
+Windowed 100,000-particle hourglass Half-turn measurements on the Apple M4 Pro, triggered after 360 frames of settling. The simulation-to-wall-time ratio covers the full measured interval, including settling and turning.
+
+| Mode | Median FPS during turn | p95 frame | Slowest frame | Simulation / wall time |
+| :--- | ---: | ---: | ---: | ---: |
+| Adaptive | 60.0 | 17.87 ms | 18.35 ms | 0.798 |
+| Full quality | 30.2 | 50.32 ms | 51.58 ms | 0.973 |
+
+Both turns reached 180° and all particles retained their identities and stayed contained. The adaptive run still missed the 16.67 ms frame budget on some frames.

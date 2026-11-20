@@ -888,3 +888,216 @@ fn gpu_compact_grid_fast_grains_do_not_pass_through_each_other() {
         "compact-grid collision missed: {out:?}"
     );
 }
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_settled_100k_hourglass_half_turn_keeps_neighbour_cells_bounded() {
+    check_settled_100k_hourglass_half_turn(6);
+}
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_adaptive_100k_hourglass_half_turn_keeps_neighbour_cells_bounded() {
+    check_settled_100k_hourglass_half_turn(4);
+}
+
+fn check_settled_100k_hourglass_half_turn(iterations: usize) {
+    use particles::{
+        controls::{rotation_step, FIXED_DT},
+        vessel::VesselKind,
+    };
+    let (device, queue) = device();
+    let mut recipe = Recipe::balanced();
+    recipe.vessel = VesselKind::Hourglass;
+    recipe.budget = 100_000;
+    let seed = Seed::from(&Simulation::seeded(&recipe).unwrap());
+    let mut engine = Engine::new(&device, &queue, &seed);
+    engine.advance(&device, &queue, &[Step::default(); 720]);
+
+    let mut remaining = std::f32::consts::PI;
+    let mut speed = 0.0;
+    let mut steps = Vec::new();
+    while remaining > 0.0 {
+        (speed, remaining) = rotation_step(speed, 0.0, remaining, FIXED_DT);
+        steps.push(Step {
+            dt: FIXED_DT,
+            angular_speed: speed,
+            shake: [0.0; 2],
+        });
+    }
+
+    let side = engine.side as usize;
+    let cell_size = engine.grid_cell_size();
+    let mut cells = vec![0u32; side * side];
+    let mut peak = 0;
+    for batch in steps.chunks(16) {
+        engine.advance_with_iterations(&device, &queue, batch, iterations);
+        cells.fill(0);
+        for p in engine.read_particles(&device, &queue) {
+            let cell = |coordinate: f32| {
+                (((coordinate + 1.0) / cell_size).floor() as i32 + 1).clamp(0, side as i32 - 1)
+                    as usize
+            };
+            let bin = &mut cells[cell(p.position[1]) * side + cell(p.position[0])];
+            *bin += 1;
+            peak = peak.max(*bin);
+        }
+    }
+    // Dense cells make every surrounding search expensive. Leave room for
+    // different GPU scatter orders while rejecting a corner collapse.
+    assert!(
+        peak < 256,
+        "Half-turn packed {peak} particles into one cell"
+    );
+    assert!((engine.angle - std::f32::consts::PI).abs() < 1e-4);
+    let particles = engine.read_particles(&device, &queue);
+    assert_eq!(particles.len(), seed.particles.len());
+    assert!(particles
+        .iter()
+        .zip(&seed.particles)
+        .enumerate()
+        .all(|(id, (p, original))| {
+            p.id == id as u32
+                && p.material == original.material
+                && p.position
+                    .iter()
+                    .chain(&p.velocity)
+                    .all(|value| value.is_finite())
+                && seed
+                    .vessel
+                    .clearance(glam::Vec2::from_array(p.position), engine.angle)
+                    + 0.0005
+                    >= p.radius
+        }));
+    eprintln!("Peak cell population during Half-turn with {iterations} passes: {peak}");
+}
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_liquids_and_bubbles_settle_after_shaking() {
+    use particles::material::Preset;
+    let (device, queue) = device();
+    let mut recipe = Preset::LiquidsAndBubbles.recipe();
+    recipe.budget = 100_000;
+    let seed = Seed::from(&Simulation::seeded(&recipe).unwrap());
+    let mut engine = Engine::new(&device, &queue, &seed);
+    let rms_by_material = |particles: &[GpuParticle]| {
+        let mut sum = [0.0f64; 3];
+        let mut count = [0; 3];
+        for p in particles {
+            let i = p.material as usize;
+            sum[i] += f64::from(glam::Vec2::from_array(p.velocity).length_squared());
+            count[i] += 1;
+        }
+        std::array::from_fn::<_, 3, _>(|i| (sum[i] / f64::from(count[i])).sqrt())
+    };
+
+    let shaking: Vec<_> = (0..120)
+        .map(|i| {
+            let t = i as f32 / 120.;
+            Step {
+                shake: [7. * (t * 37.).sin(), 4.5 * (t * 29.).cos()],
+                ..Step::default()
+            }
+        })
+        .collect();
+    engine.advance(&device, &queue, &shaking);
+    let driven = rms_by_material(&engine.read_particles(&device, &queue));
+    assert!(
+        driven[0] > 0.1,
+        "water barely moved during shaking: {driven:?}"
+    );
+
+    engine.advance(&device, &queue, &[Step::default(); 1440]);
+    let settled = engine.read_particles(&device, &queue);
+    let speeds = rms_by_material(&settled);
+    eprintln!("After shaking {driven:.4?}; after settling {speeds:.4?}");
+    assert!(
+        speeds[0] < 0.08 && speeds[1] < 0.08 && speeds[2] < 0.13,
+        "mixture kept churning after 12 seconds of rest: {speeds:?}"
+    );
+
+    let mut height = [0.0f64; 3];
+    let mut count = [0; 3];
+    for p in &settled {
+        let i = p.material as usize;
+        height[i] += f64::from(p.position[1]);
+        count[i] += 1;
+    }
+    let levels = std::array::from_fn::<_, 3, _>(|i| height[i] / f64::from(count[i]));
+    assert!(
+        levels[0] + 0.08 < levels[1] && levels[1] + 0.15 < levels[2],
+        "liquids and air failed to stratify: {levels:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn hourglass_neck_width_controls_gpu_neighbor_visibility() {
+    use particles::vessel::VesselKind;
+    let (device, queue) = device();
+    let particle = |x, y, vx| GpuParticle {
+        position: [x, y],
+        velocity: [vx, 0.],
+        radius: 0.0005,
+        material: 0,
+        id: 0,
+        padding: 0,
+    };
+    let a = particle(0.02925, 0.0775, -0.05);
+    let b = particle(0.03165, 0.0825, 0.05);
+    let run = |seed: &Seed| {
+        let mut engine = Engine::new(&device, &queue, seed);
+        engine.advance(&device, &queue, &[Step::default()]);
+        engine.read_particles(&device, &queue)[0].velocity[0]
+    };
+
+    let mut recipe = Recipe::balanced();
+    recipe.vessel = VesselKind::Hourglass;
+    let mut neighbor_effect = |width| {
+        recipe.neck_width_percent = width;
+        let mut seed = Seed::from(&Simulation::seeded(&recipe).unwrap());
+        seed.base_radius = 0.0015;
+        seed.materials[0].viscosity = 8.;
+        seed.materials[0].thermal_motion = 0.;
+        seed.materials[0].surface_tension = 0.;
+        seed.particles = vec![a];
+        let isolated = run(&seed);
+        seed.particles.push(b);
+        (run(&seed) - isolated).abs()
+    };
+
+    let narrow = neighbor_effect(50);
+    let wide = neighbor_effect(250);
+    assert!(narrow < 1e-5, "narrow wall leaked viscosity: {narrow}");
+    assert!(wide > 1e-4, "wide opening blocked viscosity: {wide}");
+}
+
+#[test]
+#[ignore = "requires a compute-capable GPU"]
+fn gpu_five_percent_hourglass_passes_only_grains_that_fit() {
+    use particles::vessel::VesselKind;
+    let (device, queue) = device();
+    let mut recipe = Recipe::balanced();
+    recipe.vessel = VesselKind::Hourglass;
+    recipe.neck_width_percent = 5;
+    let mut seed = Seed::from(&Simulation::seeded(&recipe).unwrap());
+
+    for angle in [0., std::f32::consts::PI] {
+        seed.angle = angle;
+        for (radius, passes) in [(0.0024, true), (0.005, false)] {
+            seed.particles = vec![GpuParticle {
+                radius,
+                ..p(0., 0.24, 3)
+            }];
+            let mut engine = Engine::new(&device, &queue, &seed);
+            engine.advance(&device, &queue, &[Step::default(); 360]);
+            let out = engine.read_particles(&device, &queue)[0];
+            let chamber = if passes { -1. } else { 1. };
+            assert!(
+                out.position[1] * chamber >= 0.08,
+                "wrong chamber at angle {angle} for grain with radius {radius}: {out:?}"
+            );
+        }
+    }
+}

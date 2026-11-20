@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 pub const MAP_SIZE: usize = 512;
 pub const MAP_EXTENT: f32 = 1.1;
+pub const DEFAULT_NECK_WIDTH_PERCENT: u16 = 100;
+pub const HOURGLASS_NECK_WIDTH_RANGE: std::ops::RangeInclusive<u16> = 5..=250;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum VesselKind {
     #[default]
@@ -51,6 +53,7 @@ pub struct Vessel {
     pub map: Vec<[f32; 4]>,
     /// Segment endpoints, then radius/kind/reserved, also uploaded for exact visibility.
     pub barriers: Vec<[f32; 8]>,
+    map_size: usize,
     area: f32,
     upper_area: f32,
 }
@@ -126,16 +129,28 @@ fn segments_intersect(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
 }
 impl Vessel {
     pub fn new(kind: VesselKind, seed: u64) -> Arc<Self> {
-        type Cache = std::collections::HashMap<(VesselKind, u64), std::sync::Weak<Vessel>>;
+        Self::with_neck_width(kind, seed, DEFAULT_NECK_WIDTH_PERCENT)
+    }
+
+    /// Set the Hourglass opening as a percentage of its original width, clamped
+    /// to the supported range. Other vessel shapes ignore this setting.
+    pub fn with_neck_width(kind: VesselKind, seed: u64, neck_width_percent: u16) -> Arc<Self> {
+        type Cache = std::collections::HashMap<(VesselKind, u64, u16), std::sync::Weak<Vessel>>;
         static CACHE: std::sync::OnceLock<std::sync::Mutex<Cache>> = std::sync::OnceLock::new();
-        let key = (
-            kind,
-            if kind == VesselKind::RockGarden {
-                seed
-            } else {
-                0
-            },
-        );
+        let seed = if kind == VesselKind::RockGarden {
+            seed
+        } else {
+            0
+        };
+        let neck_width_percent = if kind == VesselKind::Hourglass {
+            neck_width_percent.clamp(
+                *HOURGLASS_NECK_WIDTH_RANGE.start(),
+                *HOURGLASS_NECK_WIDTH_RANGE.end(),
+            )
+        } else {
+            DEFAULT_NECK_WIDTH_PERCENT
+        };
+        let key = (kind, seed, neck_width_percent);
         let cache = CACHE.get_or_init(Default::default);
         if let Some(v) = cache
             .lock()
@@ -145,7 +160,7 @@ impl Vessel {
         {
             return v;
         }
-        let vessel = Self::build(kind, seed);
+        let vessel = Self::build(kind, seed, neck_width_percent);
         let mut entries = cache.lock().unwrap();
         if let Some(existing) = entries.get(&key).and_then(std::sync::Weak::upgrade) {
             return existing;
@@ -154,30 +169,32 @@ impl Vessel {
         entries.insert(key, Arc::downgrade(&vessel));
         vessel
     }
-    fn build(kind: VesselKind, seed: u64) -> Arc<Self> {
+    fn build(kind: VesselKind, seed: u64, neck_width_percent: u16) -> Arc<Self> {
         if kind == VesselKind::Circle {
             return Arc::new(Self {
                 kind,
                 map: vec![[0.; 4]],
                 barriers: vec![],
+                map_size: 1,
                 area: std::f32::consts::PI,
                 upper_area: std::f32::consts::PI * 0.5,
             });
         }
         let mut rng = StdRng::seed_from_u64(seed);
         let outline: Vec<Vec2> = if kind == VesselKind::Hourglass {
+            let neck = 0.06 * (f32::from(neck_width_percent) / 100.);
             [
                 (-0.58, 0.80),
                 (0.58, 0.80),
                 (0.58, 0.62),
-                (0.06, 0.08),
-                (0.06, -0.08),
+                (neck, 0.08),
+                (neck, -0.08),
                 (0.58, -0.62),
                 (0.58, -0.80),
                 (-0.58, -0.80),
                 (-0.58, -0.62),
-                (-0.06, -0.08),
-                (-0.06, 0.08),
+                (-neck, -0.08),
+                (-neck, 0.08),
                 (-0.58, 0.62),
             ]
             .into_iter()
@@ -255,12 +272,19 @@ impl Vessel {
             }
             d
         };
-        let mut map = Vec::with_capacity(MAP_SIZE * MAP_SIZE);
+        // Sample the centerline of narrow openings directly. With an even grid,
+        // interpolation between its two central columns understates clearance.
+        let map_size = if kind == VesselKind::Hourglass && neck_width_percent < 50 {
+            MAP_SIZE + 1
+        } else {
+            MAP_SIZE
+        };
+        let mut map = Vec::with_capacity(map_size * map_size);
         let mut area = 0.;
         let mut upper_area = 0.;
-        let cell = 2. * MAP_EXTENT / (MAP_SIZE - 1) as f32;
-        for y in 0..MAP_SIZE {
-            for x in 0..MAP_SIZE {
+        let cell = 2. * MAP_EXTENT / (map_size - 1) as f32;
+        for y in 0..map_size {
+            for x in 0..map_size {
                 let p = Vec2::new(x as f32, y as f32) * cell - Vec2::splat(MAP_EXTENT);
                 let d = distance(p);
                 let eps = 0.0005;
@@ -282,9 +306,13 @@ impl Vessel {
             kind,
             map,
             barriers,
+            map_size,
             area,
             upper_area,
         })
+    }
+    pub(crate) fn map_size(&self) -> usize {
+        self.map_size
     }
     pub fn area(&self, upper_only: bool) -> f32 {
         if upper_only {
@@ -298,17 +326,17 @@ impl Vessel {
             return (1. - p.length(), -p.normalize_or(Vec2::Y));
         }
         let local = rotate(p, -angle);
-        let uv = ((local / (2. * MAP_EXTENT) + Vec2::splat(0.5)) * (MAP_SIZE - 1) as f32)
-            .clamp(Vec2::ZERO, Vec2::splat((MAP_SIZE - 1) as f32));
-        let x = (uv.x as usize).min(MAP_SIZE - 2);
-        let y = (uv.y as usize).min(MAP_SIZE - 2);
+        let size = self.map_size;
+        let uv = ((local / (2. * MAP_EXTENT) + Vec2::splat(0.5)) * (size - 1) as f32)
+            .clamp(Vec2::ZERO, Vec2::splat((size - 1) as f32));
+        let x = (uv.x as usize).min(size - 2);
+        let y = (uv.y as usize).min(size - 2);
         let t = uv - Vec2::new(x as f32, y as f32);
         let mut sample = [0.; 3];
         for (c, value) in sample.iter_mut().enumerate() {
-            let a = self.map[y * MAP_SIZE + x][c] * (1. - t.x)
-                + self.map[y * MAP_SIZE + x + 1][c] * t.x;
-            let b = self.map[(y + 1) * MAP_SIZE + x][c] * (1. - t.x)
-                + self.map[(y + 1) * MAP_SIZE + x + 1][c] * t.x;
+            let a = self.map[y * size + x][c] * (1. - t.x) + self.map[y * size + x + 1][c] * t.x;
+            let b = self.map[(y + 1) * size + x][c] * (1. - t.x)
+                + self.map[(y + 1) * size + x + 1][c] * t.x;
             *value = a * (1. - t.y) + b * t.y;
         }
         (

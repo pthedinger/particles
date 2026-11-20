@@ -131,6 +131,8 @@ pub struct Recipe {
     pub temperature_c: f32,
     pub vessel: crate::vessel::VesselKind,
     pub layout_seed: u64,
+    /// Hourglass opening as a percentage of the original width.
+    pub neck_width_percent: u16,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preset {
@@ -172,6 +174,10 @@ impl Preset {
         };
         for (m, s) in r.materials.iter_mut().zip(shares) {
             m.share = s;
+        }
+        if self == Self::LiquidsAndBubbles {
+            r.materials[0].viscosity = 6.;
+            r.materials[1].viscosity = 8.;
         }
         if self == Self::ViscousSlurry {
             r.materials[0].viscosity = 5.;
@@ -259,6 +265,7 @@ impl Recipe {
             temperature_c: 20.,
             vessel: crate::vessel::VesselKind::Circle,
             layout_seed: 17,
+            neck_width_percent: crate::vessel::DEFAULT_NECK_WIDTH_PERCENT,
         }
     }
     pub fn effective_materials(&self) -> Vec<Material> {
@@ -318,6 +325,14 @@ impl Recipe {
         Ok(())
     }
     pub fn validate(&self) -> Result<(), String> {
+        let neck_width_range = crate::vessel::HOURGLASS_NECK_WIDTH_RANGE;
+        if !neck_width_range.contains(&self.neck_width_percent) {
+            return Err(format!(
+                "Choose an hourglass neck width from {} to {}%.",
+                neck_width_range.start(),
+                neck_width_range.end()
+            ));
+        }
         if !self.temperature_c.is_finite() || !(-20.0..=150.0).contains(&self.temperature_c) {
             return Err("Choose a temperature from -20 to 150°C.".into());
         }

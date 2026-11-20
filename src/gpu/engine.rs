@@ -22,7 +22,7 @@ struct Params {
     thermal_tick: u32,
     angle: f32,
     cell_size: f32,
-    vessel_kind: u32,
+    wall_correction_scale: f32,
     pose: [f32; 2],
     previous_pose: [f32; 2],
 }
@@ -142,11 +142,7 @@ impl Engine {
             wgpu::BufferUsages::STORAGE,
         );
         let boundary = cached.unwrap_or_else(|| {
-            let map_size = if seed.vessel.kind == crate::vessel::VesselKind::Circle {
-                1
-            } else {
-                crate::vessel::MAP_SIZE as u32
-            };
+            let map_size = seed.vessel.map_size() as u32;
             let boundary_texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("vessel clearance and normal"),
                 size: wgpu::Extent3d {
@@ -395,6 +391,20 @@ impl Engine {
         self.active = 1 - self.active;
     }
     pub fn advance(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, steps: &[Step]) {
+        self.advance_with_iterations(device, queue, steps, SOLVER_ITERATIONS);
+    }
+
+    pub fn advance_with_iterations(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        steps: &[Step],
+        iterations: usize,
+    ) {
+        let iterations = iterations.clamp(4, SOLVER_ITERATIONS);
+        // Preserve more of the rotating-wall correction when doing fewer passes.
+        // Limit the per-pass increase so particles cannot jump past thin obstacles.
+        let wall_correction_scale = (1.5 / iterations as f32).min(0.5);
         for chunk in steps.chunks(MAX_STEPS) {
             let mut packed = vec![0u8; chunk.len() * 256];
             for (i, s) in chunk.iter().enumerate() {
@@ -423,7 +433,7 @@ impl Engine {
                     thermal_tick: self.thermal_tick,
                     angle: self.angle,
                     cell_size: self.cell_size,
-                    vessel_kind: self.vessel_kind,
+                    wall_correction_scale,
                     pose: [self.angle.cos(), self.angle.sin()],
                     previous_pose: [previous_angle.cos(), previous_angle.sin()],
                 };
@@ -443,7 +453,7 @@ impl Engine {
                 self.dispatch(&mut encoder, 12, slot, self.count.div_ceil(128));
                 self.dispatch(&mut encoder, 11, slot, self.count.div_ceil(128));
                 self.active = 1 - self.active;
-                for _ in 0..SOLVER_ITERATIONS {
+                for _ in 0..iterations {
                     self.grid(&mut encoder, slot);
                     self.dispatch(&mut encoder, 7, slot, self.count.div_ceil(128));
                     self.dispatch(&mut encoder, 8, slot, self.count.div_ceil(128));
@@ -501,6 +511,8 @@ fn rounded_visibility_needed(radius: f32, h: f32, min_radius: f32) -> bool {
 }
 fn visibility_shader(vessel: &crate::vessel::Vessel, h: f32, min_radius: f32) -> (String, bool) {
     let vector = |x: f32, y: f32| format!("vec2<f32>({x:?},{y:?})");
+    const DEFAULT_WALL_GATE: &str =
+        "fn needs_wall_check(_position: vec2<f32>, _pose: vec2<f32>) -> bool { return NEEDS_VISIBILITY; }\n";
     if vessel.kind == crate::vessel::VesselKind::Hourglass {
         // Width is affine between outline vertices. Only the two re-entrant
         // neck planes can be crossed by a segment joining interior points.
@@ -518,11 +530,23 @@ fn visibility_shader(vessel: &crate::vessel::Vessel, h: f32, min_radius: f32) ->
             .collect();
         planes.sort_by(f32::total_cmp);
         planes.dedup();
-        let mut source=String::from("fn clear_segment(world_a:vec2<f32>,world_b:vec2<f32>,pose:vec2<f32>)->bool{let a=vec2<f32>(dot(world_a,pose),dot(world_a,vec2<f32>(-pose.y,pose.x)));let b=vec2<f32>(dot(world_b,pose),dot(world_b,vec2<f32>(-pose.y,pose.x)));let dy=b.y-a.y; if abs(dy)>1e-12{");
+        let mut source = String::from("fn clear_segment(world_a:vec2<f32>,world_b:vec2<f32>,pose:vec2<f32>)->bool{let a=vec2<f32>(dot(world_a,pose),dot(world_a,vec2<f32>(-pose.y,pose.x)));let b=vec2<f32>(dot(world_b,pose),dot(world_b,vec2<f32>(-pose.y,pose.x)));let dy=b.y-a.y; if abs(dy)>1e-12{");
+        // A neighbour within h can only cross a neck plane when the query
+        // particle lies within h of that plane. Evaluate this once per gather.
+        let mut needs_wall_check = String::from(
+            "fn needs_wall_check(p: vec2<f32>, pose: vec2<f32>) -> bool {\n\
+             let y = dot(p, vec2<f32>(-pose.y, pose.x));\n\
+             let reach = params.h + 0.000001;\n\
+             return false",
+        );
         for y in planes {
+            needs_wall_check += &format!(" || abs(y - ({y:?})) <= reach");
             source+=&format!("if (a.y-({y:?}))*(b.y-({y:?}))<=0.0{{let x=a.x+(b.x-a.x)*({y:?}-a.y)/dy;if abs(x)>{width:?}{{return false;}}}}");
         }
-        source += "}return true;}";
+        source += "}return true;}
+";
+        source += &needs_wall_check;
+        source += ";}";
         return (source, true);
     }
     // The other outer outlines are convex. A segment joining free points
@@ -534,13 +558,12 @@ fn visibility_shader(vessel: &crate::vessel::Vessel, h: f32, min_radius: f32) ->
         .collect();
     if active.is_empty() {
         return (
-            String::from(
-                "fn clear_segment(a:vec2<f32>,b:vec2<f32>,pose:vec2<f32>)->bool{return true;}",
-            ),
+            format!("{DEFAULT_WALL_GATE}fn clear_segment(a:vec2<f32>,b:vec2<f32>,pose:vec2<f32>)->bool{{return true;}}"),
             false,
         );
     }
-    let mut source=String::from("fn clear_segment(world_a:vec2<f32>,world_b:vec2<f32>,pose:vec2<f32>)->bool {let cs=pose.x;let sn=pose.y;let a=vec2<f32>(cs*world_a.x+sn*world_a.y,-sn*world_a.x+cs*world_a.y);let b=vec2<f32>(cs*world_b.x+sn*world_b.y,-sn*world_b.x+cs*world_b.y);let lo=min(a,b);let hi=max(a,b);\n");
+    let mut source = String::from(DEFAULT_WALL_GATE);
+    source += "fn clear_segment(world_a:vec2<f32>,world_b:vec2<f32>,pose:vec2<f32>)->bool {let cs=pose.x;let sn=pose.y;let a=vec2<f32>(cs*world_a.x+sn*world_a.y,-sn*world_a.x+cs*world_a.y);let b=vec2<f32>(cs*world_b.x+sn*world_b.y,-sn*world_b.x+cs*world_b.y);let lo=min(a,b);let hi=max(a,b);\n";
     for wall in active {
         let c = glam::Vec2::new(wall[0], wall[1]);
         let d = glam::Vec2::new(wall[2], wall[3]);

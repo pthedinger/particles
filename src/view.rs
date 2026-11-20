@@ -7,6 +7,7 @@ use bevy_inspector_egui::{
 use particles::{
     controls::view_to_world,
     material::{Material, MaterialProperties, Phase, Preset},
+    vessel::{VesselKind, HOURGLASS_NECK_WIDTH_RANGE},
 };
 use std::time::Instant;
 
@@ -294,6 +295,33 @@ fn vessel_selector(ui: &mut egui::Ui, state: &mut Art) {
                 .color(MUTED),
         );
     });
+    if state.recipe.vessel == VesselKind::Hourglass {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Neck width");
+            ui.add(
+                egui::Slider::new(
+                    &mut state.pending_neck_width_percent,
+                    HOURGLASS_NECK_WIDTH_RANGE,
+                )
+                .suffix("%"),
+            );
+            if ui
+                .add_enabled(
+                    state.pending_neck_width_percent != state.recipe.neck_width_percent,
+                    egui::Button::new("Apply width"),
+                )
+                .on_hover_text("Rebuilds the hourglass and resets particle placement.")
+                .clicked()
+            {
+                state.apply_hourglass_neck_width();
+            }
+            ui.label(
+                RichText::new("100% is the original opening")
+                    .size(10.)
+                    .color(MUTED),
+            );
+        });
+    }
 }
 
 fn sidebar(ctx: &egui::Context, state: &mut Art) {
@@ -442,6 +470,24 @@ fn sidebar_contents(ui: &mut egui::Ui, state: &mut Art) {
         .size(10.0)
         .color(MUTED),
     );
+    if state.gpu {
+        ui.horizontal(|ui| {
+            let toggle = ui.checkbox(&mut state.adaptive, "Adaptive 60 FPS");
+            if toggle.changed() {
+                state.frame_budget = Default::default();
+            }
+            toggle.on_hover_text("Reduces solver passes and may slow the simulation to keep drawing responsive. Uncheck for full accuracy.");
+            if state.adaptive {
+                let budget = state.physics_budget;
+                let pace = if budget.max_steps < 2 && !state.paused {
+                    " · slowed"
+                } else {
+                    ""
+                };
+                ui.small(format!("{} passes{}", budget.iterations, pace));
+            }
+        });
+    }
     if state.clock.dropped_time > 0.1 {
         ui.label(
             RichText::new(format!(

@@ -12,7 +12,10 @@ use bevy::{
 };
 use bevy_inspector_egui::bevy_egui::EguiUserTextures;
 use particles::gpu::{Engine, GpuMaterial, Seed, Step};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 #[derive(Default, Clone)]
 pub struct Feedback {
     pub checked: bool,
@@ -30,17 +33,36 @@ pub struct GpuFrame {
     seed: Option<Arc<Seed>>,
     revision: u64,
     steps: Vec<Step>,
+    iterations: usize,
+    ready: Arc<AtomicBool>,
+    batches: Arc<AtomicUsize>,
     materials: Vec<GpuMaterial>,
     image: Handle<Image>,
     pub check: bool,
     pub capture: Option<String>,
     pub feedback: Arc<Mutex<Feedback>>,
 }
+impl GpuFrame {
+    pub fn ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+    pub fn busy(&self) -> bool {
+        // Bevy overlaps construction of the next frame with the render world.
+        // The render world's current frame and an already submitted batch can
+        // overlap. Leave space for one more handoff before withholding work.
+        self.batches.load(Ordering::Acquire) >= 3
+    }
+    pub fn reserve_batch(&self) {
+        self.batches.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 #[derive(Resource, Default)]
 struct Runtime {
     engine: Option<Engine>,
     revision: u64,
     simulated: f32,
+    materials: Vec<GpuMaterial>,
 }
 pub struct GpuArtPlugin;
 impl Plugin for GpuArtPlugin {
@@ -98,6 +120,7 @@ fn publish(mut art: ResMut<Art>, mut frame: ResMut<GpuFrame>) {
         .as_ref()
         .map(|p| format!("{p}.vessel.png"));
     frame.steps = std::mem::take(&mut art.gpu_steps);
+    frame.iterations = art.physics_budget.iterations;
     frame.materials = art.simulation.materials.iter().map(Into::into).collect();
     art.physics_ms = frame.feedback.lock().unwrap().submission_ms;
 }
@@ -115,7 +138,8 @@ fn run(
         return;
     };
     let d = device.wgpu_device();
-    if runtime.engine.is_none() || runtime.revision != frame.revision {
+    let reseeded = runtime.engine.is_none() || runtime.revision != frame.revision;
+    if reseeded {
         if let Some(engine) = runtime.engine.as_mut() {
             engine.reseed(d, &queue, seed);
         } else {
@@ -125,10 +149,29 @@ fn run(
         runtime.simulated = 0.;
     }
     let start = std::time::Instant::now();
+    let materials_changed = reseeded || runtime.materials != frame.materials;
+    if materials_changed {
+        runtime.materials.clone_from(&frame.materials);
+    }
     let engine = runtime.engine.as_mut().unwrap();
-    engine.upload_materials(&queue, &frame.materials);
-    engine.advance(d, &queue, &frame.steps);
-    engine.draw(d, &queue, &image.texture_view);
+    if materials_changed {
+        engine.upload_materials(&queue, &frame.materials);
+    }
+    let advanced = !frame.steps.is_empty();
+    if advanced {
+        engine.advance_with_iterations(d, &queue, &frame.steps, frame.iterations);
+    }
+    // Reuse the finished image when no new particle state needs to be shown.
+    if advanced || materials_changed {
+        engine.draw(d, &queue, &image.texture_view);
+    }
+    if advanced {
+        let batches = frame.batches.clone();
+        queue.on_submitted_work_done(move || {
+            batches.fetch_sub(1, Ordering::AcqRel);
+        });
+    }
+    frame.ready.store(true, Ordering::Release);
     let ms = start.elapsed().as_secs_f32() * 1000.;
     if frame.check && !frame.feedback.lock().unwrap().checked {
         eprintln!("GPU snapshot: reading particle state");

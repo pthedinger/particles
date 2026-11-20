@@ -5,7 +5,7 @@ struct Material {
     color: vec4<f32>, density: f32, viscosity: f32, friction: f32, phase: u32, surface_tension:f32, compression_resistance:f32, mixing_resistance:f32, neighbor_target:f32, thermal_motion:f32, padding:array<f32,3>
 }
 struct Params {
-    n: u32, side: u32, h: f32, radius: f32, dt: f32, angular: f32, shake: vec2<f32>, cells: u32, blocks: u32, max_radius:f32, min_radius:f32, thermal_tick:u32, angle:f32, cell_size:f32, vessel_kind:u32, pose:vec2<f32>, previous_pose:vec2<f32>
+    n: u32, side: u32, h: f32, radius: f32, dt: f32, angular: f32, shake: vec2<f32>, cells: u32, blocks: u32, max_radius:f32, min_radius:f32, thermal_tick:u32, angle:f32, cell_size:f32, wall_correction_scale:f32, pose:vec2<f32>, previous_pose:vec2<f32>
 }
 struct Info {
     previous: vec2<f32>, environment: vec2<f32>, buoyancy: vec2<f32>, lambda: f32, load: f32, damping: vec2<f32>, warm_support: vec2<f32>, wall_distance:f32, pad0:f32, pad1:f32, pad2:f32
@@ -37,30 +37,30 @@ fn volume(p:Particle) -> f32 {
     let r=p.radius/params.radius;
     return r*r;
 }
-fn rest_density(p:Particle)->f32{return volume(p)+materials[p.material].neighbor_target;}
+
+// Liquid pressure adds no equal reaction to the separate gas solve. Use
+// a reduced gas volume here so moving parcels displace liquid more gently.
+const GAS_PRESSURE_VOLUME: f32 = 0.25;
 fn bath_noise(id:u32,tick:u32)->vec2<f32>{var x=id^(tick*747796405u)^2891336453u;x^=x>>16u;x*=2246822519u;x^=x>>13u;x*=3266489917u;x^=x>>16u;return (vec2<f32>(f32(x&65535u),f32(x>>16u))/32767.5-1.0)*1.7320508;}
 fn mass(p:Particle) -> f32 {
     return materials[p.material].density*volume(p);
 }
-fn pressure_weight(p:Particle) -> f32 {
-    if materials[p.material].phase==2u{
-        return 0.0;
-    }
-    return 1.0/mass(p);
+// Only cells overlapping the search bounds can contain a neighbour.
+struct NeighborCells {
+    low: vec2<i32>,
+    high: vec2<i32>,
 }
-// Gas parcels carry their own compressible pressure. Liquid treats their
-// volume as an immersed boundary, rather than crushing low-mass samples with
-// the liquid incompressibility projection. Buoyancy/drag still couple motion.
-fn constraint_neighbor_weight(p:Particle,q:Particle)->f32 {
-    if materials[p.material].phase==0u&&materials[q.material].phase==1u{return 0.0;}
-    return pressure_weight(q);
+fn neighbor_cells(position: vec2<f32>, reach: f32) -> NeighborCells {
+    let bounds = vec2<f32>(reach);
+    return NeighborCells(cell_xy(position - bounds), cell_xy(position + bounds));
 }
-fn in_support(p:Particle,q:Particle,wall_margin:f32)->bool {
+
+fn in_support(p: Particle, q: Particle, wall_margin: f32, check_walls: bool) -> bool {
     let d=p.position-q.position;
     if dot(d,d)>=params.h*params.h{return false;}
     // Cached at the last grid build. Environment/prediction conservatively add
     // wall motion since the previous step; constraint passes use current positions.
-    if NEEDS_VISIBILITY&&(!CACHE_VISIBILITY||min(info[p.id].wall_distance,info[q.id].wall_distance)<params.h*1.5+params.max_radius+wall_margin+0.0087){
+    if NEEDS_VISIBILITY&&check_walls&&(!CACHE_VISIBILITY||min(info[p.id].wall_distance,info[q.id].wall_distance)<params.h*1.5+params.max_radius+wall_margin+0.0087){
         let pose=select(params.pose,params.previous_pose,wall_margin>0.0);
         if !clear_segment(p.position,q.position,pose){return false;}
     }
@@ -69,8 +69,7 @@ fn in_support(p:Particle,q:Particle,wall_margin:f32)->bool {
 fn limited(v:vec2<f32>, maximum:f32)->vec2<f32>{
     return v*min(1.0,maximum/max(length(v),1e-10));
 }
-fn direction(i:u32,j:u32,d:vec2<f32>)->vec2<f32>{
-    let r=length(d);
+fn direction(i:u32,j:u32,d:vec2<f32>,r:f32)->vec2<f32>{
     if r>1e-7{
         return d/r;
     }
@@ -181,11 +180,12 @@ fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
     }
     let p=src[i];
     let a=materials[p.material];
-    let xy=cell_xy(p.position);
+    let cells=neighbor_cells(p.position,params.h);
+    let check_walls = needs_wall_check(p.position, params.previous_pose);
     var env=vec2<f32>(0.0);
     var touching=false;
-    for(var y=max(xy.y-1,0);y<=min(xy.y+1,i32(params.side)-1);y++){
-        for(var x=max(xy.x-1,0);x<=min(xy.x+1,i32(params.side)-1);x++){
+    for(var y=cells.low.y;y<=cells.high.y;y++){
+        for(var x=cells.low.x;x<=cells.high.x;x++){
             let c=u32(y)*params.side+u32(x);
             for(var k=cell_start(c);k<cell_start(c+1u);k++){
                 let q=src[k];
@@ -193,7 +193,7 @@ fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
                 if j==p.id{
                     continue;
                 }
-                if !in_support(p,q,abs(params.angular)*params.dt*1.5+0.0001){continue;}
+                if !in_support(p,q,abs(params.angular)*params.dt*1.5+0.0001,check_walls){continue;}
                 let b=materials[q.material];
                 if a.phase==2u&&b.phase==2u{let d=p.position-q.position;let reach=p.radius+q.radius+0.000001;if dot(d,d)<=reach*reach{touching=true;}}
                 if b.phase==0u&&(a.phase!=0u||p.material!=q.material){
@@ -225,11 +225,12 @@ fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
     }
     var p=src[i];
     let a=materials[p.material];
-    let xy=cell_xy(p.position);
+    let cells=neighbor_cells(p.position,params.h);
+    let check_walls = needs_wall_check(p.position, params.previous_pose);
     var acceleration=vec2<f32>(0.0,-1.8)-params.shake+info[p.id].buoyancy;
     if a.phase==0u {
-        for(var y=max(xy.y-1,0);y<=min(xy.y+1,i32(params.side)-1);y++){
-            for(var x=max(xy.x-1,0);x<=min(xy.x+1,i32(params.side)-1);x++){
+        for(var y=cells.low.y;y<=cells.high.y;y++){
+            for(var x=cells.low.x;x<=cells.high.x;x++){
                 let c=u32(y)*params.side+u32(x);
                 for(var k=cell_start(c);k<cell_start(c+1u);k++){
                     let q=src[k];
@@ -240,7 +241,7 @@ fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
                     let b=materials[q.material];
                     let env=info[j].environment;
                     if env.y>0.0001&&(b.phase!=0u||p.material!=q.material){
-                        if !in_support(p,q,abs(params.angular)*params.dt*1.5+0.0001){continue;}
+                        if !in_support(p,q,abs(params.angular)*params.dt*1.5+0.0001,check_walls){continue;}
                         let w=max(0.0,1.0-distance(p.position,q.position)/params.h);
                         acceleration-=info[j].buoyancy*(w*w/env.y)*(mass(q)/mass(p));
                     }
@@ -252,7 +253,8 @@ fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
     info[p.id].load=0.0;
     p.velocity+=limited(acceleration,18.0)*params.dt;
     if a.thermal_motion>0.0{p.velocity+=bath_noise(p.id,params.thermal_tick)*a.thermal_motion*sqrt(params.dt);}
-    var drag=0.08;
+    // Front and back glass dissipate fluid motion in the vessel's frame.
+    var drag=1.8;
     if a.phase==2u{
         drag=0.3+a.friction*3.0;
     }
@@ -285,13 +287,16 @@ fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
         info[p.id].lambda=0.0;
         return;
     }
-    let xy=cell_xy(p.position);
-    var rho=volume(p);
-    let rest=rest_density(p);
+    let cells=neighbor_cells(p.position,params.h);
+    let check_walls = needs_wall_check(p.position, params.pose);
+    let p_volume = volume(p);
+    let inverse_mass = 1.0 / (a.density * p_volume);
+    let rest = p_volume + a.neighbor_target;
+    var rho = p_volume;
     var grad=vec2<f32>(0.0);
     var denominator=0.0;
-    for(var y=max(xy.y-1,0);y<=min(xy.y+1,i32(params.side)-1);y++){
-        for(var x=max(xy.x-1,0);x<=min(xy.x+1,i32(params.side)-1);x++){
+    for(var y=cells.low.y;y<=cells.high.y;y++){
+        for(var x=cells.low.x;x<=cells.high.x;x++){
             let c=u32(y)*params.side+u32(x);
             for(var k=cell_start(c);k<cell_start(c+1u);k++){
                 let q=src[k];
@@ -299,19 +304,25 @@ fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
                 if j==p.id{
                     continue;
                 }
-                if !in_support(p,q,0.0){continue;}
-                if a.phase==1u&&materials[q.material].phase==0u{continue;}
+                if !in_support(p,q,0.0,check_walls){continue;}
+                let b=materials[q.material];
+                if a.phase==1u&&b.phase==0u{continue;}
                 let d=p.position-q.position;
-                let w=max(0.0,1.0-length(d)/params.h);
-                let v=volume(q);
-                rho+=v*w*w;
-                let g=direction(p.id,j,d)*(-2.0*w/params.h/rest)*v;
+                let r=length(d);
+                let w=max(0.0,1.0-r/params.h);
+                let gas_boundary = a.phase == 0u && b.phase == 1u;
+                let v = volume(q) * select(1.0, GAS_PRESSURE_VOLUME, gas_boundary);
+                rho += v * w * w;
+                let g=direction(p.id,j,d,r)*(-2.0*w/params.h/rest)*v;
                 grad+=g;
-                denominator+=constraint_neighbor_weight(p,q)*dot(g,g);
+                // Solids and gas seen by liquid contribute density without pressure feedback.
+                if b.phase != 2u && !gas_boundary {
+                    denominator += dot(g, g) / (b.density * v);
+                }
             }
         }
     }
-    info[p.id].lambda=-a.compression_resistance*max(rho/rest-1.0,0.0)/(denominator+pressure_weight(p)*dot(grad,grad)+80.0);
+    info[p.id].lambda=-a.compression_resistance*max(rho/rest-1.0,0.0)/(denominator+inverse_mass*dot(grad,grad)+80.0);
 }
 @compute @workgroup_size(128) fn project(@builtin(global_invocation_id) gid:vec3<u32>) {
     let i=gid.x;
@@ -320,14 +331,18 @@ fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
     }
     var p=src[i];
     let a=materials[p.material];
-    let xy=cell_xy(p.position);
-    var lo=max(xy-vec2<i32>(1),vec2<i32>(0));var hi=min(xy+vec2<i32>(1),vec2<i32>(i32(params.side)-1));
-    if a.phase==2u{let reach=p.radius+params.max_radius;lo=cell_xy(p.position-vec2<f32>(reach));hi=cell_xy(p.position+vec2<f32>(reach));}
+    let reach=select(params.h, min(p.radius+params.max_radius, params.h), a.phase==2u);
+    let cells=neighbor_cells(p.position,reach);
+    let check_walls = needs_wall_check(p.position, params.pose);
+    let p_volume = volume(p);
+    let p_mass = a.density * p_volume;
+    let inverse_mass = 1.0 / p_mass;
+    let own_pressure = info[p.id].lambda / (p_volume + a.neighbor_target);
     var delta=vec2<f32>(0.0);
     var contact=vec2<f32>(0.0);
     var load=0.0;
-    for(var y=lo.y;y<=hi.y;y++){
-        for(var x=lo.x;x<=hi.x;x++){
+    for(var y=cells.low.y;y<=cells.high.y;y++){
+        for(var x=cells.low.x;x<=cells.high.x;x++){
             let c=u32(y)*params.side+u32(x);
             for(var k=cell_start(c);k<cell_start(c+1u);k++){
                 let q=src[k];
@@ -343,58 +358,67 @@ fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
                     if b.phase!=2u||dot(d,d)>=(p.radius+q.radius)*(p.radius+q.radius){
                         continue;
                     }
-                    if !in_support(p,q,0.0){continue;}
+                    if !in_support(p,q,0.0,check_walls){continue;}
                     let r=length(d);
-                    let normal=direction(p.id,j,d);
+                    let normal=direction(p.id,j,d,r);
                     let overlap=p.radius+q.radius-r;
-                    let wi=mass(q)/(mass(p)+mass(q));
-                    contact+=normal*min(overlap*wi*0.85,p.radius*0.4);
-                    load+=min(overlap*wi*0.85,p.radius*0.4);
+                    let q_mass=b.density*volume(q);
+                    let wi=q_mass/(p_mass+q_mass);
+                    let correction=min(overlap*wi*0.85,p.radius*0.4);
+                    contact+=normal*correction;
+                    load+=correction;
                     continue;
                 }
-                if !in_support(p,q,0.0){continue;}
-                let r=length(d);
-                let normal=direction(p.id,j,d);
-                let w=max(0.0,1.0-r/params.h);
-                let wi=mass(q)/(mass(p)+mass(q));
-                let g=normal*(-2.0*w/params.h);
-                if !(a.phase==1u&&b.phase==0u) {
-                    var neighbour_lambda=info[j].lambda;
-                    if a.phase==0u&&b.phase==1u{neighbour_lambda=0.0;}
-                    delta+=g*(info[p.id].lambda*volume(q)/rest_density(p)+neighbour_lambda*volume(p)/rest_density(q))*pressure_weight(p);
+                // Gas does not receive pressure or contact from liquid samples.
+                if (a.phase == 1u && b.phase == 0u) || !in_support(p,q,0.0,check_walls) {
+                    continue;
                 }
-                if p.material==q.material&&a.phase!=2u&&r>p.radius+q.radius{
-                    var tension=0.00012;
-                    if a.phase==1u{
-                        tension=0.0007;
-                    }
+                let r=length(d);
+                let normal=direction(p.id,j,d,r);
+                let w=max(0.0,1.0-r/params.h);
+                let q_volume = volume(q);
+                let gas_boundary = a.phase == 0u && b.phase == 1u;
+                var pressure = own_pressure * q_volume * select(1.0, GAS_PRESSURE_VOLUME, gas_boundary);
+                if b.phase != 2u && !gas_boundary {
+                    pressure += info[j].lambda * p_volume / (q_volume + b.neighbor_target);
+                }
+                delta += normal * (-2.0 * w / params.h) * pressure * inverse_mass;
+                if p.material==q.material&&r>p.radius+q.radius{
+                    let tension=select(0.00012,0.0007,a.phase==1u);
+                    let q_mass=b.density*q_volume;
+                    let wi=q_mass/(p_mass+q_mass);
                     delta-=normal*(w*w*params.radius*tension*a.surface_tension*120.0)*wi;
                 }
                 else if a.phase==0u&&b.phase==0u&&p.material!=q.material{
                     delta+=normal*(w*w*params.radius*0.007*sqrt(a.mixing_resistance*b.mixing_resistance));
                 }
-                var contact_distance=0.0;
-                var weight=wi;
-                if a.phase==2u&&b.phase==2u{
-                    contact_distance=p.radius+q.radius;
-                }
-                else if a.phase!=2u&&b.phase==2u{
-                    contact_distance=q.radius;
-                    weight=1.0;
-                }
-                let overlap=contact_distance-r;
-                if overlap>0.0{
-                    contact+=normal*min(overlap*weight*0.85,p.radius*0.4);
+                if b.phase==2u&&r<q.radius{
+                    contact+=normal*min((q.radius-r)*0.85,p.radius*0.4);
                 }
             }
         }
     }
     let before=p.position;
-    p.position=contained(p.position+limited(delta,p.radius*0.2)+limited(contact,p.radius*0.4),p.radius);
+    let wall_motion = select(0.0, abs(params.angular) * params.dt * length(p.position), VESSEL_KIND != 0u);
+    // A rotating wall can advance several particle radii in a single step.
+    // Let the iterative solve undo that compression throughout the packed bed.
+    let wall_correction = min(0.0125, params.wall_correction_scale * wall_motion);
+    let pressure_limit = max(p.radius * 0.2, wall_correction);
+    let contact_limit = max(p.radius * 0.4, wall_correction);
+    p.position = contained(
+        p.position + limited(delta, pressure_limit) + limited(contact, contact_limit),
+        p.radius,
+    );
     if a.phase==2u{info[p.id].warm_support=limited(info[p.id].warm_support+(p.position-before)/(params.dt*params.dt),3.6);}
     dst[i]=p;
     info[p.id].load+=load;
 }
+fn viscosity_weight(a: Material, b: Material, w: f32) -> f32 {
+    // Let viscous fluids use more of the stable, normalized damping budget.
+    let fluid_pair = a.phase != 2u && b.phase != 2u;
+    return min(params.dt * (a.viscosity + b.viscosity) * w * 2.0, select(0.08, 0.48, fluid_pair));
+}
+
 // Compute a symmetric bound on each particle's total Jacobi damping weight.
 // Sequential pair damping is contractive; an unbounded sum of parallel pair
 // updates is not. Normalizing by max(A_i,A_j,1) keeps both endpoints stable.
@@ -405,17 +429,18 @@ fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
     }
     let p=src[i];
     let a=materials[p.material];
-    let xy=cell_xy(p.position);
+    let cells=neighbor_cells(p.position,params.h);
+    let check_walls = needs_wall_check(p.position, params.pose);
     var weights=vec2<f32>(0.0);
-    for(var y=max(xy.y-1,0);y<=min(xy.y+1,i32(params.side)-1);y++){
-        for(var x=max(xy.x-1,0);x<=min(xy.x+1,i32(params.side)-1);x++){
+    for(var y=cells.low.y;y<=cells.high.y;y++){
+        for(var x=cells.low.x;x<=cells.high.x;x++){
             let c=u32(y)*params.side+u32(x);
             for(var k=cell_start(c);k<cell_start(c+1u);k++){
                 let q=src[k];
                 if q.id==p.id{
                     continue;
                 }
-                if !in_support(p,q,0.0){continue;}
+                if !in_support(p,q,0.0,check_walls){continue;}
                 let b=materials[q.material];
                 let r=distance(p.position,q.position);
                 let wi=mass(q)/(mass(p)+mass(q));
@@ -426,7 +451,7 @@ fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
                 }
                 else {
                     let w=max(0.0,1.0-r/params.h);
-                    weights.x+=min(params.dt*(a.viscosity+b.viscosity)*w*2.0,0.08)*wi;
+                    weights.x += viscosity_weight(a, b, w) * wi;
                 }
             }
         }
@@ -440,11 +465,12 @@ fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
     }
     var p=src[i];
     let a=materials[p.material];
-    let xy=cell_xy(p.position);
+    let cells=neighbor_cells(p.position,params.h);
+    let check_walls = needs_wall_check(p.position, params.pose);
     var velocity=(p.position-info[p.id].previous)/params.dt;
     var damping=vec2<f32>(0.0);
-    for(var y=max(xy.y-1,0);y<=min(xy.y+1,i32(params.side)-1);y++){
-        for(var x=max(xy.x-1,0);x<=min(xy.x+1,i32(params.side)-1);x++){
+    for(var y=cells.low.y;y<=cells.high.y;y++){
+        for(var x=cells.low.x;x<=cells.high.x;x++){
             let c=u32(y)*params.side+u32(x);
             for(var k=cell_start(c);k<cell_start(c+1u);k++){
                 let q=src[k];
@@ -452,7 +478,7 @@ fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
                 if j==p.id{
                     continue;
                 }
-                if !in_support(p,q,0.0){continue;}
+                if !in_support(p,q,0.0,check_walls){continue;}
                 let b=materials[q.material];
                 let d=p.position-q.position;
                 let r=length(d);
@@ -463,7 +489,7 @@ fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
                     if r>p.radius+q.radius{
                         continue;
                     }
-                    let normal=direction(p.id,j,d);
+                    let normal=direction(p.id,j,d,r);
                     let closing=min(dot(rel,normal),0.0);
                     let tangent=rel-normal*dot(rel,normal);
                     let normal_load=(info[p.id].load+info[j].load)/params.dt-closing;
@@ -472,7 +498,7 @@ fn swept_container(start:vec2<f32>,destination:vec2<f32>,r:f32)->vec2<f32>{
                 }
                 else {
                     let w=max(0.0,1.0-r/params.h);
-                    damping-=rel*min(params.dt*(a.viscosity+b.viscosity)*w*2.0,0.08)*wi/max(1.0,max(info[p.id].damping.x,info[j].damping.x));
+                    damping -= rel * viscosity_weight(a, b, w) * wi / max(1.0, max(info[p.id].damping.x,info[j].damping.x));
                 }
             }
         }
